@@ -27,10 +27,10 @@ npx tsc --noEmit
 # Check Rust
 cargo check --manifest-path src-tauri/Cargo.toml
 
-# Run Rust tests (55 tests)
+# Run Rust tests (109 tests)
 cargo test --manifest-path src-tauri/Cargo.toml
 
-# Run frontend tests (34 tests via Vitest)
+# Run frontend tests (54 tests via Vitest)
 npm test
 
 # Watch mode for frontend tests
@@ -49,7 +49,8 @@ All file system, network, and process operations live in Rust. The frontend only
 - `runtime.rs` — GitHub releases API, asset scoring/selection, versioned download/extraction, managed/custom runtime operations
 - `huggingface.rs` — HF API search/repo-files, curated `RECOMMENDED_MODELS` list, quant extraction
 - `models.rs` — GGUF scanning (recursive, multi-directory), binary metadata parser (name/params/context/vision tags), metadata cache, download with resume/retry, mmproj auto-detection
-- `server.rs` — `ServerConfig` with typed fields + `extra_params` HashMap, process spawn/kill with SIGTERM+timeout, stdout/stderr streaming, CLI arg builder
+- `server.rs` — `ServerConfig` with typed fields + `extra_params` HashMap, process spawn/kill with SIGTERM+timeout, stdout/stderr streaming, CLI arg builder. Uses `llama-spec.json` for migration of old config keys.
+- `llama_spec.rs` — `LlamaSpec` loader: embeds default via `include_str!()`, extracts to disk on first launch, applies migrations to `extra_params`
 
 ### Frontend (`src/`)
 - React Router v6 with a persistent sidebar layout

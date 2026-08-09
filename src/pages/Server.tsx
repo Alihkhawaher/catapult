@@ -15,11 +15,9 @@ import {
   Trash2,
   Eye,
 } from "lucide-react";
-import type { ModelInfo, ServerConfig, ServerStatus } from "../types";
+import type { ModelInfo, ServerConfig, ServerStatus, LlamaSpec } from "../types";
 
 // ── Utility components ──────────────────────────────────────────────────────
-
-const KV_TYPES = ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"] as const;
 
 function Slider({ label, hint, value, min, max, step, onChange, format }: {
   label: string; hint?: string; value: number;
@@ -135,6 +133,131 @@ function Section({ title }: { title: string }) {
   return <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 mt-5 first:mt-0">{title}</p>;
 }
 
+// ── Dynamic param renderer ─────────────────────────────────────────────────
+
+function DynamicParam({ param, config, setConfig }: {
+  param: import("../types").LlamaParamDef;
+  config: ServerConfig;
+  setConfig: React.Dispatch<React.SetStateAction<ServerConfig>>;
+}) {
+  const key = param.cli_flag;
+
+  // Read value: typed params from config fields, non-typed from extra_params
+  const getValue = (): string => {
+    if (param.typed) {
+      const v = (config as unknown as Record<string, unknown>)[param.key];
+      if (v === null || v === undefined) return "";
+      return String(v);
+    }
+    return config.extra_params?.[key] ?? "";
+  };
+
+  const getNumValue = (): number | null => {
+    const v = getValue();
+    if (v === "") return null;
+    const n = parseFloat(v);
+    return isNaN(n) ? null : n;
+  };
+
+  const getBoolValue = (): boolean => {
+    if (param.typed) {
+      return Boolean((config as unknown as Record<string, unknown>)[param.key]);
+    }
+    return key in (config.extra_params ?? {});
+  };
+
+  const setStringValue = (v: string) => {
+    if (param.typed) {
+      setConfig((c) => ({ ...c, [param.key]: v }));
+    } else {
+      setConfig((c) => {
+        const ep = { ...c.extra_params };
+        if (v === "") delete ep[key]; else ep[key] = v;
+        return { ...c, extra_params: ep };
+      });
+    }
+  };
+
+  const setNumValue = (v: number | null) => {
+    if (param.typed) {
+      setConfig((c) => ({ ...c, [param.key]: v }));
+    } else {
+      setStringValue(v !== null ? String(v) : "");
+    }
+  };
+
+  const setBoolValue = (on: boolean) => {
+    if (param.typed) {
+      setConfig((c) => ({ ...c, [param.key]: on }));
+    } else {
+      setConfig((c) => {
+        const ep = { ...c.extra_params };
+        if (on) ep[key] = ""; else delete ep[key];
+        return { ...c, extra_params: ep };
+      });
+    }
+  };
+
+  // Render widget based on type
+  if (param.type === "bool") {
+    return <Toggle label={param.label} hint={param.description} checked={getBoolValue()} onChange={setBoolValue} />;
+  }
+
+  if (param.type === "enum" && param.enum_values) {
+    const options = param.enum_values.map((v) => ({ value: v, label: v || "None" }));
+    return <SelectInput label={param.label} hint={param.description} value={getValue()} options={options} onChange={setStringValue} />;
+  }
+
+  if (param.widget === "slider" && param.min !== undefined && param.max !== undefined) {
+    const val = getNumValue() ?? parseFloat(param.default) ?? 0;
+    const decimals = param.decimals ?? (param.type === "float" ? 2 : 0);
+    return <Slider label={param.label} hint={param.description} value={val}
+      min={param.min} max={param.max} step={param.step ?? 1}
+      onChange={setNumValue} format={(v) => decimals > 0 ? v.toFixed(decimals) : String(Math.round(v))} />;
+  }
+
+  if (param.type === "integer" || param.type === "float") {
+    return <NumberInput label={param.label} hint={param.description} value={getNumValue()}
+      step={param.step ?? (param.type === "float" ? 0.01 : 1)}
+      onChange={setNumValue} />;
+  }
+
+  // Default: string
+  return <TextInput label={param.label} hint={param.description} value={getValue()} onChange={setStringValue} />;
+}
+
+function DynamicCategory({ category, spec, config, setConfig }: {
+  category: string;
+  spec: import("../types").LlamaSpec;
+  config: ServerConfig;
+  setConfig: React.Dispatch<React.SetStateAction<ServerConfig>>;
+}) {
+  const params = spec.params.filter((p) => p.category === category);
+  if (params.length === 0) return null;
+
+  // Group typed and non-typed params separately for layout
+  const typedParams = params.filter((p) => p.typed);
+  const extraParams = params.filter((p) => !p.typed);
+
+  return (
+    <>
+      {typedParams.length > 0 && (
+        <div className="grid grid-cols-2 gap-3">
+          {typedParams.map((p) => <DynamicParam key={p.key} param={p} config={config} setConfig={setConfig} />)}
+        </div>
+      )}
+      {extraParams.length > 0 && (
+        <>
+          {typedParams.length > 0 && <Section title="Additional Parameters" />}
+          <div className="grid grid-cols-2 gap-3">
+            {extraParams.map((p) => <DynamicParam key={p.key} param={p} config={config} setConfig={setConfig} />)}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 // ── Tabs ─────────────────────────────────────────────────────────────────────
 
 const TABS = ["Context", "Hardware", "Sampling", "Server", "Chat", "Advanced"] as const;
@@ -168,7 +291,7 @@ const DEFAULT_CONFIG: ServerConfig = {
   rope_freq_base: null,
   grp_attn_n: null,
   grp_attn_w: null,
-  parallel: 1,
+  parallel: -1,
   extra_params: {},
 };
 
@@ -180,51 +303,27 @@ const SESSION_PRESET_KEY = "catapult_server_preset";
 const SESSION_TAB_KEY = "catapult_server_tab";
 const SESSION_STATUS_KEY = "catapult_server_status";
 
-// Mirror of server::migrate_extra_params. Renames/drops flags removed in
-// newer llama.cpp builds so old session state and imported presets keep working.
-const REMOVED_EP_KEYS = ["spec-ngram-size-n", "spec-ngram-size-m", "spec-ngram-min-hits"] as const;
-const RENAMED_EP_KEYS: Record<string, string> = {
-  "draft": "spec-draft-n-max",
-  "draft-max": "spec-draft-n-max",
-  "draft-n-max": "spec-draft-n-max",
-  "draft-min": "spec-draft-n-min",
-  "draft-n-min": "spec-draft-n-min",
-  "model-draft": "spec-draft-model",
-  "ctx-size-draft": "spec-draft-ctx-size",
-  "n-gpu-layers-draft": "spec-draft-ngl",
-  "gpu-layers-draft": "spec-draft-ngl",
-  "device-draft": "spec-draft-device",
-  "threads-draft": "spec-draft-threads",
-  "threads-batch-draft": "spec-draft-threads-batch",
-  "cpu-moe-draft": "spec-draft-cpu-moe",
-  "draft-cpu-moe": "spec-draft-cpu-moe",
-  "n-cpu-moe-draft": "spec-draft-n-cpu-moe",
-  "override-tensor-draft": "spec-draft-override-tensor",
-  "draft-p-min": "spec-draft-p-min",
-  "draft-p-split": "spec-draft-p-split",
-  "hf-repo-draft": "spec-draft-hf",
-  "cache-type-k-draft": "spec-draft-type-k",
-  "cache-type-v-draft": "spec-draft-type-v",
-};
-
-export function migrateExtraParams(extra: Record<string, string>): Record<string, string> {
+// Spec-driven migration: reads drop/rename lists from the loaded LlamaSpec
+export function migrateExtraParams(extra: Record<string, string>, spec?: LlamaSpec): Record<string, string> {
   const out = { ...extra };
-  for (const k of REMOVED_EP_KEYS) delete out[k];
-  for (const [oldKey, newKey] of Object.entries(RENAMED_EP_KEYS)) {
-    if (oldKey in out && !(newKey in out)) {
-      out[newKey] = out[oldKey];
+  if (spec) {
+    for (const k of spec.migrations.drop) delete out[k];
+    for (const [oldKey, newKey] of Object.entries(spec.migrations.rename)) {
+      if (oldKey in out && !(newKey in out)) {
+        out[newKey] = out[oldKey];
+      }
+      delete out[oldKey];
     }
-    delete out[oldKey];
   }
   return out;
 }
 
-function loadSessionConfig(): ServerConfig | null {
+function loadSessionConfig(spec?: LlamaSpec): ServerConfig | null {
   try {
     const raw = sessionStorage.getItem(SESSION_CONFIG_KEY);
     if (!raw) return null;
     const cfg = JSON.parse(raw) as ServerConfig;
-    if (cfg.extra_params) cfg.extra_params = migrateExtraParams(cfg.extra_params);
+    if (cfg.extra_params) cfg.extra_params = migrateExtraParams(cfg.extra_params, spec);
     return cfg;
   } catch { return null; }
 }
@@ -239,6 +338,7 @@ function loadSessionStatus(): ServerStatus {
 export default function Server() {
   const navigate = useNavigate();
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [spec, setLlamaSpec] = useState<LlamaSpec | null>(null);
   const [config, setConfigRaw] = useState<ServerConfig>(() => loadSessionConfig() ?? DEFAULT_CONFIG);
   const [status, setStatusRaw] = useState<ServerStatus>(loadSessionStatus);
   const [logs, setLogs] = useState<string[]>([]);
@@ -307,34 +407,6 @@ export default function Server() {
   useEffect(() => {
     if (logsRef.current) logsRef.current.scrollTop = logsRef.current.scrollHeight;
   }, [logs]);
-
-  // ── Extra params helpers ──────────────────────────────────────────────────
-
-  const getEp = (key: string): string => config.extra_params?.[key] ?? "";
-  const getEpNum = (key: string): number | null => {
-    const v = config.extra_params?.[key];
-    if (v === undefined || v === "") return null;
-    const n = parseFloat(v);
-    return isNaN(n) ? null : n;
-  };
-  const setEp = (key: string, value: string) => {
-    setConfig((c) => {
-      const ep = { ...c.extra_params };
-      if (value === "") delete ep[key]; else ep[key] = value;
-      return { ...c, extra_params: ep };
-    });
-  };
-  const setEpNum = (key: string, value: number | null) => {
-    setEp(key, value !== null ? String(value) : "");
-  };
-  const hasFlag = (key: string): boolean => key in (config.extra_params ?? {});
-  const setFlag = (key: string, on: boolean) => {
-    setConfig((c) => {
-      const ep = { ...c.extra_params };
-      if (on) ep[key] = ""; else delete ep[key];
-      return { ...c, extra_params: ep };
-    });
-  };
 
   // ── Presets ────────────────────────────────────────────────────────────────
 
@@ -466,6 +538,17 @@ export default function Server() {
   };
 
   useEffect(() => {
+    // Load the llama spec first, then use it for migrations
+    invoke<string>("get_llama_spec").then((json) => {
+      const spec = JSON.parse(json) as LlamaSpec;
+      setLlamaSpec(spec);
+      // Re-apply migrations to session config now that we have the spec
+      const sessionCfg = loadSessionConfig(spec);
+      if (sessionCfg) setConfigRaw(sessionCfg);
+    }).catch((e) => {
+      console.warn("Failed to load llama spec:", e);
+    });
+
     loadData();
     refreshPresets();
     // Only load defaults if no session-restored config
@@ -735,545 +818,13 @@ export default function Server() {
         {/* Tab content */}
         <div className="card space-y-4">
 
-          {/* ════════════════════════ CONTEXT ════════════════════════ */}
-          {activeTab === "Context" && <>
-            <Section title="Context & Prediction" />
-            <div className="grid grid-cols-2 gap-3">
-              <NumberInput label="Context Size" hint="0 = auto (model default)" value={config.n_ctx} min={0} max={1048576} step={512}
-                onChange={(v) => setConfig((c) => ({ ...c, n_ctx: v ?? 0 }))} />
-              <NumberInput label="Max Tokens" hint="-1 = unlimited" value={config.n_predict} min={-1}
-                onChange={(v) => setConfig((c) => ({ ...c, n_predict: v ?? -1 }))} />
-              <NumberInput label="Batch Size" hint="Logical max batch (default: 2048)" value={config.n_batch} min={1} max={16384} step={32}
-                onChange={(v) => setConfig((c) => ({ ...c, n_batch: v ?? 2048 }))} />
-              <NumberInput label="Micro-batch Size" hint="Physical max batch (default: 512)" value={config.n_ubatch} min={1} max={16384} step={32}
-                onChange={(v) => setConfig((c) => ({ ...c, n_ubatch: v ?? 512 }))} />
-              <NumberInput label="Keep Tokens" hint="Tokens to keep from initial prompt (0=none, -1=all)" value={getEpNum("keep")}
-                onChange={(v) => setEpNum("keep", v)} />
-            </div>
-
-            <Section title="Attention & KV Cache" />
-            <div className="grid grid-cols-2 gap-3">
-              <SelectInput label="Flash Attention" value={config.flash_attn}
-                options={[{ value: "auto", label: "Auto" }, { value: "on", label: "On" }, { value: "off", label: "Off" }]}
-                onChange={(v) => setConfig((c) => ({ ...c, flash_attn: v }))} />
-              <div /> {/* spacer */}
-              <SelectInput label="KV Cache Type (K)" value={config.cache_type_k}
-                options={KV_TYPES.map((t) => ({ value: t, label: t }))}
-                onChange={(v) => setConfig((c) => ({ ...c, cache_type_k: v }))} />
-              <SelectInput label="KV Cache Type (V)" value={config.cache_type_v}
-                options={KV_TYPES.map((t) => ({ value: t, label: t }))}
-                onChange={(v) => setConfig((c) => ({ ...c, cache_type_v: v }))} />
-            </div>
-            <div className="space-y-3 mt-2">
-              <Toggle label="SWA Full" hint="Use full-size sliding window attention cache" checked={hasFlag("swa-full")} onChange={(v) => setFlag("swa-full", v)} />
-              <Toggle label="KV Offload" hint="Offload KV cache to GPU (default: on)" checked={!hasFlag("no-kv-offload")} onChange={(v) => setFlag("no-kv-offload", !v)} />
-              <Toggle label="KV Unified" hint="Single unified KV buffer shared across sequences" checked={hasFlag("kv-unified") || (!hasFlag("no-kv-unified") && config.parallel <= 1)}
-                onChange={(v) => { setFlag("kv-unified", v); setFlag("no-kv-unified", !v); }} />
-              <Toggle label="Context Shift" hint="Use context shift on infinite text generation" checked={hasFlag("context-shift")} onChange={(v) => { setFlag("context-shift", v); setFlag("no-context-shift", !v); }} />
-              <Toggle label="Cache Prompt" hint="Enable prompt caching (default: on)" checked={!hasFlag("no-cache-prompt")} onChange={(v) => setFlag("no-cache-prompt", !v)} />
-              <Toggle label="Cache Idle Slots" hint="Save and clear idle slots on new task (default: on, requires KV unified + cache-ram)"
-                checked={!hasFlag("no-cache-idle-slots")} onChange={(v) => setFlag("no-cache-idle-slots", !v)} />
-            </div>
-            <div className="grid grid-cols-2 gap-3 mt-2">
-              <NumberInput label="Cache Reuse" hint="Min chunk for KV shifting reuse (0=disabled)" value={getEpNum("cache-reuse")} min={0}
-                onChange={(v) => setEpNum("cache-reuse", v)} />
-              <NumberInput label="Cache RAM (MiB)" hint="Max cache size (-1=no limit, 0=disabled, default: 8192)" value={getEpNum("cache-ram")}
-                onChange={(v) => setEpNum("cache-ram", v)} />
-              <NumberInput label="Context Checkpoints" hint="Max checkpoints per slot (default: 32)" value={getEpNum("ctx-checkpoints")} min={0}
-                onChange={(v) => setEpNum("ctx-checkpoints", v)} />
-              <NumberInput label="Checkpoint Interval" hint="Checkpoint every N tokens (-1=disable, default: 8192)" value={getEpNum("checkpoint-every-n-tokens")}
-                onChange={(v) => setEpNum("checkpoint-every-n-tokens", v)} />
-            </div>
-          </>}
-
-          {/* ════════════════════════ HARDWARE ════════════════════════ */}
-          {activeTab === "Hardware" && <>
-            <Section title="GPU" />
-            <div className="grid grid-cols-2 gap-3">
-              <NumberInput label="GPU Layers" hint="-1 = all on GPU, 0 = CPU only" value={config.n_gpu_layers} min={-1}
-                onChange={(v) => setConfig((c) => ({ ...c, n_gpu_layers: v ?? -1 }))} />
-              <SelectInput label="Split Mode" hint="Multi-GPU split strategy" value={getEp("split-mode") || "layer"}
-                options={[{ value: "none", label: "None (single GPU)" }, { value: "layer", label: "Layer (default)" }, { value: "row", label: "Row" }]}
-                onChange={(v) => setEp("split-mode", v === "layer" ? "" : v)} />
-              <TextInput label="Tensor Split" hint="GPU split ratios, e.g. 3,1" value={getEp("tensor-split")} placeholder="e.g. 3,1"
-                onChange={(v) => setEp("tensor-split", v)} />
-              <NumberInput label="Main GPU" hint="Primary GPU index (default: 0)" value={getEpNum("main-gpu")} min={0}
-                onChange={(v) => setEpNum("main-gpu", v)} />
-              <TextInput label="Device" hint="Devices for offloading, comma-separated" value={getEp("device")}
-                onChange={(v) => setEp("device", v)} />
-              <SelectInput label="Fit" hint="Auto-adjust params to fit device memory" value={getEp("fit") || "on"}
-                options={[{ value: "on", label: "On (default)" }, { value: "off", label: "Off" }]}
-                onChange={(v) => setEp("fit", v === "on" ? "" : v)} />
-              <TextInput label="Fit Target (MiB)" hint="Target margin per device (default: 1024)" value={getEp("fit-target")} placeholder="1024"
-                onChange={(v) => setEp("fit-target", v)} />
-              <NumberInput label="Fit Min Ctx" hint="Min context size for --fit (default: 4096)" value={getEpNum("fit-ctx")} min={0}
-                onChange={(v) => setEpNum("fit-ctx", v)} />
-            </div>
-
-            <Section title="CPU" />
-            <div className="grid grid-cols-2 gap-3">
-              <NumberInput label="Threads" hint="CPU threads for generation (-1=auto)" value={config.n_threads}
-                onChange={(v) => setConfig((c) => ({ ...c, n_threads: v }))} />
-              <NumberInput label="Threads Batch" hint="Threads for batch processing (default: same as threads)" value={getEpNum("threads-batch")}
-                onChange={(v) => setEpNum("threads-batch", v)} />
-              <SelectInput label="NUMA" hint="NUMA optimizations" value={getEp("numa") || ""}
-                options={[{ value: "", label: "Disabled" }, { value: "distribute", label: "Distribute" }, { value: "isolate", label: "Isolate" }, { value: "numactl", label: "numactl" }]}
-                onChange={(v) => setEp("numa", v)} />
-            </div>
-
-            <Section title="Memory" />
-            <div className="space-y-3">
-              <Toggle label="mlock" hint="Lock model in RAM (prevents swapping)" checked={config.mlock}
-                onChange={(v) => setConfig((c) => ({ ...c, mlock: v }))} />
-              <Toggle label="Memory Map" hint="Memory-map model file (default: on)" checked={!config.no_mmap}
-                onChange={(v) => setConfig((c) => ({ ...c, no_mmap: !v }))} />
-              <Toggle label="Direct IO" hint="Use DirectIO if available" checked={hasFlag("direct-io")} onChange={(v) => setFlag("direct-io", v)} />
-              <Toggle label="CPU MoE" hint="Keep all MoE weights on CPU" checked={hasFlag("cpu-moe")} onChange={(v) => setFlag("cpu-moe", v)} />
-              <Toggle label="CPU MoE (Draft)" hint="Keep all MoE weights on CPU for draft model" checked={hasFlag("spec-draft-cpu-moe")} onChange={(v) => setFlag("spec-draft-cpu-moe", v)} />
-              <Toggle label="Repack" hint="Enable weight repacking (default: on)" checked={!hasFlag("no-repack")} onChange={(v) => setFlag("no-repack", !v)} />
-              <Toggle label="Op Offload" hint="Offload host tensor ops to device (default: on)" checked={!hasFlag("no-op-offload")} onChange={(v) => setFlag("no-op-offload", !v)} />
-              <Toggle label="No Host Buffer" hint="Bypass host buffer for extra device buffers" checked={hasFlag("no-host")} onChange={(v) => setFlag("no-host", v)} />
-              <Toggle label="Check Tensors" hint="Validate model tensor data on load" checked={hasFlag("check-tensors")} onChange={(v) => setFlag("check-tensors", v)} />
-            </div>
-            <div className="grid grid-cols-2 gap-3 mt-2">
-              <NumberInput label="N CPU MoE Layers" hint="Keep MoE weights of first N layers on CPU" value={getEpNum("n-cpu-moe")} min={0}
-                onChange={(v) => setEpNum("n-cpu-moe", v)} />
-              <NumberInput label="N CPU MoE Layers (Draft)" hint="Keep MoE weights of first N layers on CPU for draft" value={getEpNum("spec-draft-n-cpu-moe")} min={0}
-                onChange={(v) => setEpNum("spec-draft-n-cpu-moe", v)} />
-            </div>
-
-            <Section title="Overrides" />
-            <div className="grid grid-cols-1 gap-3">
-              <TextInput label="Override Tensor" hint="<pattern>=<buffer type>,... e.g. attn_v=cuda0" value={getEp("override-tensor")}
-                onChange={(v) => setEp("override-tensor", v)} />
-              <TextInput label="Override Tensor (Draft)" hint="Tensor buffer type override for draft model: <pattern>=<type>,..." value={getEp("spec-draft-override-tensor")}
-                onChange={(v) => setEp("spec-draft-override-tensor", v)} />
-              <TextInput label="Override KV" hint="KEY=TYPE:VALUE,... e.g. tokenizer.ggml.add_bos_token=bool:false" value={getEp("override-kv")}
-                onChange={(v) => setEp("override-kv", v)} />
-            </div>
-          </>}
-
-          {/* ════════════════════════ SAMPLING ════════════════════════ */}
-          {activeTab === "Sampling" && <>
-            <Section title="Basic" />
-            <Slider label="Temperature" hint="Higher = more creative" value={config.temperature} min={0} max={2} step={0.01}
-              onChange={(v) => setConfig((c) => ({ ...c, temperature: v }))} format={(v) => v.toFixed(2)} />
-            <div className="grid grid-cols-2 gap-3">
-              <NumberInput label="Seed" hint="Empty or -1 = random" value={config.seed !== null ? config.seed : -1}
-                onChange={(v) => setConfig((c) => ({ ...c, seed: v !== null && v >= 0 ? v : null }))} />
-              <TextInput label="Samplers" hint="Sampler chain, semicolon-separated" value={getEp("samplers")}
-                placeholder="penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature"
-                onChange={(v) => setEp("samplers", v)} />
-            </div>
-
-            <Section title="Nucleus / Top-K / Min-P" />
-            <Slider label="Top-K" value={config.top_k} min={0} max={200} step={1}
-              onChange={(v) => setConfig((c) => ({ ...c, top_k: v }))} />
-            <Slider label="Top-P" value={config.top_p} min={0} max={1} step={0.01}
-              onChange={(v) => setConfig((c) => ({ ...c, top_p: v }))} format={(v) => v.toFixed(2)} />
-            <Slider label="Min-P" hint="Minimum probability relative to top token" value={config.min_p} min={0} max={1} step={0.001}
-              onChange={(v) => setConfig((c) => ({ ...c, min_p: v }))} format={(v) => v.toFixed(3)} />
-            <div className="grid grid-cols-2 gap-3">
-              <NumberInput label="Top-N-Sigma" hint="-1 = disabled" value={getEpNum("top-n-sigma")}
-                onChange={(v) => setEpNum("top-n-sigma", v)} />
-              <NumberInput label="Typical P" hint="1.0 = disabled (default)" value={getEpNum("typical")}
-                onChange={(v) => setEpNum("typical", v)} />
-            </div>
-
-            <Section title="Penalties" />
-            <div className="grid grid-cols-2 gap-3">
-              <NumberInput label="Repeat Last N" hint="0=disabled, -1=ctx_size (default: 64)" value={getEpNum("repeat-last-n")}
-                onChange={(v) => setEpNum("repeat-last-n", v)} />
-              <NumberInput label="Repeat Penalty" hint="1.0 = disabled (default)" value={getEpNum("repeat-penalty")} step={0.01}
-                onChange={(v) => setEpNum("repeat-penalty", v)} />
-              <NumberInput label="Presence Penalty" hint="0.0 = disabled (default)" value={getEpNum("presence-penalty")} step={0.01}
-                onChange={(v) => setEpNum("presence-penalty", v)} />
-              <NumberInput label="Frequency Penalty" hint="0.0 = disabled (default)" value={getEpNum("frequency-penalty")} step={0.01}
-                onChange={(v) => setEpNum("frequency-penalty", v)} />
-            </div>
-
-            <Section title="XTC" />
-            <div className="grid grid-cols-2 gap-3">
-              <NumberInput label="XTC Probability" hint="0.0 = disabled (default)" value={getEpNum("xtc-probability")} step={0.01}
-                onChange={(v) => setEpNum("xtc-probability", v)} />
-              <NumberInput label="XTC Threshold" hint="1.0 = disabled (default: 0.10)" value={getEpNum("xtc-threshold")} step={0.01}
-                onChange={(v) => setEpNum("xtc-threshold", v)} />
-            </div>
-
-            <Section title="DRY Sampling" />
-            <div className="grid grid-cols-2 gap-3">
-              <NumberInput label="DRY Multiplier" hint="0.0 = disabled (default)" value={getEpNum("dry-multiplier")} step={0.1}
-                onChange={(v) => setEpNum("dry-multiplier", v)} />
-              <NumberInput label="DRY Base" hint="Default: 1.75" value={getEpNum("dry-base")} step={0.05}
-                onChange={(v) => setEpNum("dry-base", v)} />
-              <NumberInput label="DRY Allowed Length" hint="Default: 2" value={getEpNum("dry-allowed-length")} min={0}
-                onChange={(v) => setEpNum("dry-allowed-length", v)} />
-              <NumberInput label="DRY Penalty Last N" hint="-1=ctx size, 0=disable" value={getEpNum("dry-penalty-last-n")}
-                onChange={(v) => setEpNum("dry-penalty-last-n", v)} />
-            </div>
-
-            <Section title="Adaptive Sampling" />
-            <div className="grid grid-cols-2 gap-3">
-              <NumberInput label="Adaptive Target" hint="Target probability (negative=disabled, default: -1)" value={getEpNum("adaptive-target")} step={0.01}
-                onChange={(v) => setEpNum("adaptive-target", v)} />
-              <NumberInput label="Adaptive Decay" hint="Decay rate (0.0-0.99, default: 0.90)" value={getEpNum("adaptive-decay")} step={0.01}
-                onChange={(v) => setEpNum("adaptive-decay", v)} />
-            </div>
-
-            <Section title="Dynamic Temperature" />
-            <div className="grid grid-cols-2 gap-3">
-              <NumberInput label="Range" hint="0.0 = disabled (default)" value={getEpNum("dynatemp-range")} step={0.1}
-                onChange={(v) => setEpNum("dynatemp-range", v)} />
-              <NumberInput label="Exponent" hint="Default: 1.0" value={getEpNum("dynatemp-exp")} step={0.1}
-                onChange={(v) => setEpNum("dynatemp-exp", v)} />
-            </div>
-
-            <Section title="Mirostat" />
-            <div className="grid grid-cols-2 gap-3">
-              <SelectInput label="Mode" value={getEp("mirostat") || "0"}
-                options={[{ value: "0", label: "Disabled" }, { value: "1", label: "Mirostat 1" }, { value: "2", label: "Mirostat 2" }]}
-                onChange={(v) => setEp("mirostat", v === "0" ? "" : v)} />
-              <NumberInput label="Learning Rate" hint="Default: 0.10" value={getEpNum("mirostat-lr")} step={0.01}
-                onChange={(v) => setEpNum("mirostat-lr", v)} />
-              <NumberInput label="Target Entropy" hint="Default: 5.00" value={getEpNum("mirostat-ent")} step={0.1}
-                onChange={(v) => setEpNum("mirostat-ent", v)} />
-            </div>
-
-            <Section title="Misc" />
-            <div className="space-y-3">
-              <Toggle label="Ignore EOS" hint="Continue generating past end-of-stream" checked={hasFlag("ignore-eos")} onChange={(v) => setFlag("ignore-eos", v)} />
-              <Toggle label="Backend Sampling" hint="Experimental backend sampling" checked={hasFlag("backend-sampling")} onChange={(v) => setFlag("backend-sampling", v)} />
-            </div>
-          </>}
-
-          {/* ════════════════════════ SERVER ════════════════════════ */}
-          {activeTab === "Server" && <>
-            <Section title="Network" />
-            <div className="grid grid-cols-2 gap-3">
-              <TextInput label="Host" value={config.host} onChange={(v) => setConfig((c) => ({ ...c, host: v }))} />
-              <NumberInput label="Port" value={config.port} min={1} max={65535}
-                onChange={(v) => setConfig((c) => ({ ...c, port: v ?? 8080 }))} />
-              <NumberInput label="Parallel Slots" hint="-1 = auto (default)" value={config.parallel} min={-1} max={128}
-                onChange={(v) => setConfig((c) => ({ ...c, parallel: v ?? 1 }))} />
-              <NumberInput label="Timeout (s)" hint="Read/write timeout (default: 600)" value={getEpNum("timeout")} min={0}
-                onChange={(v) => setEpNum("timeout", v)} />
-              <NumberInput label="HTTP Threads" hint="-1 = auto (default)" value={getEpNum("threads-http")}
-                onChange={(v) => setEpNum("threads-http", v)} />
-              <NumberInput label="Sleep Idle (s)" hint="Sleep after N seconds idle (-1=disabled)" value={getEpNum("sleep-idle-seconds")}
-                onChange={(v) => setEpNum("sleep-idle-seconds", v)} />
-            </div>
-            <div className="space-y-3 mt-2">
-              <Toggle label="Reuse Port" hint="Allow multiple sockets to bind to the same port" checked={hasFlag("reuse-port")} onChange={(v) => setFlag("reuse-port", v)} />
-            </div>
-
-            <Section title="API" />
-            <div className="grid grid-cols-2 gap-3">
-              <TextInput label="API Key" hint="Comma-separated keys for auth" value={getEp("api-key")}
-                onChange={(v) => setEp("api-key", v)} />
-              <TextInput label="API Key File" hint="Path to file with API keys" value={getEp("api-key-file")}
-                onChange={(v) => setEp("api-key-file", v)} />
-              <TextInput label="Alias" hint="Model name aliases for API" value={getEp("alias")}
-                onChange={(v) => setEp("alias", v)} />
-              <TextInput label="Tags" hint="Model tags (informational)" value={getEp("tags")}
-                onChange={(v) => setEp("tags", v)} />
-              <TextInput label="API Prefix" hint="URL prefix without trailing slash" value={getEp("api-prefix")}
-                onChange={(v) => setEp("api-prefix", v)} />
-              <NumberInput label="Slot Prompt Similarity" hint="Min prompt match for slot reuse (0=disabled, default: 0.10)" value={getEpNum("slot-prompt-similarity")} step={0.01}
-                onChange={(v) => setEpNum("slot-prompt-similarity", v)} />
-            </div>
-
-            <Section title="Features" />
-            <div className="space-y-3">
-              <Toggle label="Continuous Batching" hint="Process multiple requests simultaneously (default: on)" checked={config.cont_batching}
-                onChange={(v) => setConfig((c) => ({ ...c, cont_batching: v }))} />
-              <Toggle label="WebUI" hint="Serve built-in web interface (default: on)" checked={!hasFlag("no-webui")} onChange={(v) => setFlag("no-webui", !v)} />
-              <Toggle label="WebUI MCP Proxy" hint="Experimental MCP CORS proxy" checked={hasFlag("webui-mcp-proxy")} onChange={(v) => setFlag("webui-mcp-proxy", v)} />
-              <Toggle label="Metrics" hint="Prometheus-compatible metrics endpoint" checked={hasFlag("metrics")} onChange={(v) => setFlag("metrics", v)} />
-              <Toggle label="Props" hint="Allow changing global properties via POST /props" checked={hasFlag("props")} onChange={(v) => setFlag("props", v)} />
-              <Toggle label="Slots Endpoint" hint="Expose slot monitoring (default: on)" checked={!hasFlag("no-slots")} onChange={(v) => setFlag("no-slots", !v)} />
-              <Toggle label="Embedding" hint="Restrict to embedding-only mode" checked={hasFlag("embedding")} onChange={(v) => setFlag("embedding", v)} />
-              <Toggle label="Reranking" hint="Enable reranking endpoint" checked={hasFlag("reranking")} onChange={(v) => setFlag("reranking", v)} />
-              <Toggle label="Warmup" hint="Perform warmup run on start (default: on)" checked={!hasFlag("no-warmup")} onChange={(v) => setFlag("no-warmup", !v)} />
-            </div>
-            <div className="grid grid-cols-1 gap-3 mt-2">
-              <TextInput label="Tools (EXPERIMENTAL)" hint="Built-in tools to enable: read_file, file_glob_search, grep_search, exec_shell_command, write_file, edit_file, apply_diff, or 'all'"
-                value={getEp("tools")} onChange={(v) => setEp("tools", v)} />
-            </div>
-            <div className="grid grid-cols-2 gap-3 mt-2">
-              <TextInput label="Embedding Separator" hint="Separator between embeddings (default: \\n)" value={getEp("embd-separator")}
-                onChange={(v) => setEp("embd-separator", v)} />
-              <TextInput label="Classification Separator" hint="Separator for classification sequences (default: \\t)" value={getEp("cls-separator")}
-                onChange={(v) => setEp("cls-separator", v)} />
-            </div>
-
-            <Section title="SSL" />
-            <div className="grid grid-cols-2 gap-3">
-              <TextInput label="SSL Key File" value={getEp("ssl-key-file")} onChange={(v) => setEp("ssl-key-file", v)} />
-              <TextInput label="SSL Cert File" value={getEp("ssl-cert-file")} onChange={(v) => setEp("ssl-cert-file", v)} />
-            </div>
-
-            <Section title="Paths" />
-            <div className="grid grid-cols-2 gap-3">
-              <TextInput label="Static Files Path" value={getEp("path")} onChange={(v) => setEp("path", v)} />
-              <TextInput label="Slot Save Path" hint="Path to save slot KV cache" value={getEp("slot-save-path")}
-                onChange={(v) => setEp("slot-save-path", v)} />
-              <TextInput label="Media Path" hint="Directory for local media files" value={getEp("media-path")}
-                onChange={(v) => setEp("media-path", v)} />
-              <TextInput label="WebUI Config (JSON)" hint="JSON string overriding WebUI defaults" value={getEp("webui-config")}
-                onChange={(v) => setEp("webui-config", v)} />
-              <TextInput label="WebUI Config File" hint="JSON file providing default WebUI settings" value={getEp("webui-config-file")}
-                onChange={(v) => setEp("webui-config-file", v)} />
-            </div>
-          </>}
-
-          {/* ════════════════════════ CHAT ════════════════════════ */}
-          {activeTab === "Chat" && <>
-            <Section title="Chat Template" />
-            <div className="grid grid-cols-1 gap-3">
-              <TextInput label="Chat Template" hint="Jinja template name or inline template" value={getEp("chat-template")}
-                onChange={(v) => setEp("chat-template", v)} />
-              <TextInput label="Chat Template File" hint="Path to Jinja template file" value={getEp("chat-template-file")}
-                onChange={(v) => setEp("chat-template-file", v)} />
-              <TextInput label="Chat Template Kwargs" hint="JSON object for template params" value={getEp("chat-template-kwargs")}
-                placeholder='{"key":"value"}' onChange={(v) => setEp("chat-template-kwargs", v)} />
-            </div>
-            <div className="space-y-3 mt-2">
-              <Toggle label="Jinja" hint="Use Jinja template engine (default: on)" checked={!hasFlag("no-jinja")} onChange={(v) => setFlag("no-jinja", !v)} />
-              <Toggle label="Prefill Assistant" hint="Prefill assistant response if last message is assistant (default: on)"
-                checked={!hasFlag("no-prefill-assistant")} onChange={(v) => setFlag("no-prefill-assistant", !v)} />
-              <Toggle label="Skip Chat Parsing" hint="Force pure content parser, skip tool/reasoning extraction"
-                checked={hasFlag("skip-chat-parsing")} onChange={(v) => setFlag("skip-chat-parsing", v)} />
-            </div>
-
-            <Section title="Reasoning" />
-            <div className="grid grid-cols-2 gap-3">
-              <SelectInput label="Reasoning" hint="Enable thinking" value={getEp("reasoning") || "auto"}
-                options={[{ value: "auto", label: "Auto (default)" }, { value: "on", label: "On" }, { value: "off", label: "Off" }]}
-                onChange={(v) => setEp("reasoning", v === "auto" ? "" : v)} />
-              <SelectInput label="Reasoning Format" value={getEp("reasoning-format") || "auto"}
-                options={[{ value: "auto", label: "Auto (default)" }, { value: "none", label: "None" }, { value: "deepseek", label: "DeepSeek" }, { value: "deepseek-legacy", label: "DeepSeek Legacy" }]}
-                onChange={(v) => setEp("reasoning-format", v === "auto" ? "" : v)} />
-              <NumberInput label="Reasoning Budget" hint="-1=unrestricted (default), 0=immediate end" value={getEpNum("reasoning-budget")}
-                onChange={(v) => setEpNum("reasoning-budget", v)} />
-              <TextInput label="Budget Message" hint="Message injected when budget exhausted" value={getEp("reasoning-budget-message")}
-                onChange={(v) => setEp("reasoning-budget-message", v)} />
-            </div>
-
-            <Section title="Output" />
-            <div className="space-y-3">
-              <Toggle label="Escape Sequences" hint="Process \\n, \\t etc (default: on)" checked={!hasFlag("no-escape")} onChange={(v) => setFlag("no-escape", !v)} />
-              <Toggle label="Special Tokens" hint="Output special tokens" checked={hasFlag("special")} onChange={(v) => setFlag("special", v)} />
-              <Toggle label="Verbose Prompt" hint="Print verbose prompt before generation" checked={hasFlag("verbose-prompt")} onChange={(v) => setFlag("verbose-prompt", v)} />
-              <Toggle label="SPM Infill" hint="Use Suffix/Prefix/Middle infill pattern" checked={hasFlag("spm-infill")} onChange={(v) => setFlag("spm-infill", v)} />
-            </div>
-            <div className="grid grid-cols-2 gap-3 mt-2">
-              <SelectInput label="Pooling" hint="Embedding pooling type" value={getEp("pooling") || ""}
-                options={[{ value: "", label: "Model default" }, { value: "none", label: "None" }, { value: "mean", label: "Mean" }, { value: "cls", label: "CLS" }, { value: "last", label: "Last" }, { value: "rank", label: "Rank" }]}
-                onChange={(v) => setEp("pooling", v)} />
-            </div>
-          </>}
-
-          {/* ════════════════════════ ADVANCED ════════════════════════ */}
-          {activeTab === "Advanced" && <>
-            <Section title="RoPE" />
-            <div className="grid grid-cols-2 gap-3">
-              <SelectInput label="RoPE Scaling" value={getEp("rope-scaling") || ""}
-                options={[{ value: "", label: "Default" }, { value: "none", label: "None" }, { value: "linear", label: "Linear" }, { value: "yarn", label: "YaRN" }]}
-                onChange={(v) => setEp("rope-scaling", v)} />
-              <NumberInput label="RoPE Scale" hint="Context scaling factor" value={getEpNum("rope-scale")} step={0.1}
-                onChange={(v) => setEpNum("rope-scale", v)} />
-              <NumberInput label="RoPE Freq Base" value={config.rope_freq_base} step={1000}
-                onChange={(v) => setConfig((c) => ({ ...c, rope_freq_base: v }))} />
-              <NumberInput label="RoPE Freq Scale" value={config.rope_freq_scale} step={0.001}
-                onChange={(v) => setConfig((c) => ({ ...c, rope_freq_scale: v }))} />
-            </div>
-            <div className="grid grid-cols-2 gap-3 mt-2">
-              <NumberInput label="YaRN Orig Ctx" value={getEpNum("yarn-orig-ctx")} onChange={(v) => setEpNum("yarn-orig-ctx", v)} />
-              <NumberInput label="YaRN Ext Factor" hint="-1 default, 0=full interp" value={getEpNum("yarn-ext-factor")} step={0.1}
-                onChange={(v) => setEpNum("yarn-ext-factor", v)} />
-              <NumberInput label="YaRN Attn Factor" value={getEpNum("yarn-attn-factor")} step={0.1}
-                onChange={(v) => setEpNum("yarn-attn-factor", v)} />
-              <NumberInput label="YaRN Beta Slow" value={getEpNum("yarn-beta-slow")} step={0.1}
-                onChange={(v) => setEpNum("yarn-beta-slow", v)} />
-              <NumberInput label="YaRN Beta Fast" value={getEpNum("yarn-beta-fast")} step={0.1}
-                onChange={(v) => setEpNum("yarn-beta-fast", v)} />
-            </div>
-
-            <Section title="Speculative Decoding" />
-            <div className="space-y-3">
-              <Toggle label="Default Speculative Config"
-                hint="Enable a sensible default (ngram-mod with n_match=24, n_min=48, n_max=64). Quick way to try spec decoding."
-                checked={hasFlag("spec-default")} onChange={(v) => setFlag("spec-default", v)} />
-            </div>
-            <div className="grid grid-cols-2 gap-3 mt-2">
-              <TextInput label="Draft Model" hint="Path to draft model for speculation" value={getEp("spec-draft-model")}
-                onChange={(v) => setEp("spec-draft-model", v)} />
-              <SelectInput label="Spec Type" hint="draft-* types use the draft model; ngram-* types do not" value={getEp("spec-type") || ""}
-                options={[{ value: "", label: "None" },
-                  { value: "draft-simple", label: "Draft Simple" }, { value: "draft-eagle3", label: "Draft EAGLE3" }, { value: "draft-mtp", label: "Draft MTP" },
-                  { value: "ngram-cache", label: "N-gram Cache" }, { value: "ngram-simple", label: "N-gram Simple" },
-                  { value: "ngram-map-k", label: "N-gram Map K" }, { value: "ngram-map-k4v", label: "N-gram Map K4V" }, { value: "ngram-mod", label: "N-gram Mod" }]}
-                onChange={(v) => setEp("spec-type", v)} />
-              <NumberInput label="Draft Max" hint="Max draft tokens (default: 16)" value={getEpNum("spec-draft-n-max")} min={1}
-                onChange={(v) => setEpNum("spec-draft-n-max", v)} />
-              <NumberInput label="Draft Min" hint="Min draft tokens (default: 0)" value={getEpNum("spec-draft-n-min")} min={0}
-                onChange={(v) => setEpNum("spec-draft-n-min", v)} />
-              <NumberInput label="Draft P Min" hint="Min probability for greedy (default: 0.75)" value={getEpNum("spec-draft-p-min")} step={0.01}
-                onChange={(v) => setEpNum("spec-draft-p-min", v)} />
-              <NumberInput label="Draft P Split" hint="Speculative split probability" value={getEpNum("spec-draft-p-split")} step={0.01}
-                onChange={(v) => setEpNum("spec-draft-p-split", v)} />
-              <NumberInput label="Draft Ctx Size" hint="0 = from model" value={getEpNum("spec-draft-ctx-size")} min={0}
-                onChange={(v) => setEpNum("spec-draft-ctx-size", v)} />
-              <NumberInput label="Draft GPU Layers" value={getEpNum("spec-draft-ngl")}
-                onChange={(v) => setEpNum("spec-draft-ngl", v)} />
-              <NumberInput label="Draft Threads" hint="CPU threads for draft model generation" value={getEpNum("spec-draft-threads")}
-                onChange={(v) => setEpNum("spec-draft-threads", v)} />
-              <NumberInput label="Draft Batch Threads" hint="Threads for draft model batch/prompt processing" value={getEpNum("spec-draft-threads-batch")}
-                onChange={(v) => setEpNum("spec-draft-threads-batch", v)} />
-              <TextInput label="Draft Device" hint="Devices for draft model, comma-separated" value={getEp("spec-draft-device")}
-                onChange={(v) => setEp("spec-draft-device", v)} />
-              <SelectInput label="Draft KV Cache Type (K)" hint="KV cache K data type for draft model" value={getEp("spec-draft-type-k") || "f16"}
-                options={KV_TYPES.map((t) => ({ value: t, label: t }))}
-                onChange={(v) => setEp("spec-draft-type-k", v === "f16" ? "" : v)} />
-              <SelectInput label="Draft KV Cache Type (V)" hint="KV cache V data type for draft model" value={getEp("spec-draft-type-v") || "f16"}
-                options={KV_TYPES.map((t) => ({ value: t, label: t }))}
-                onChange={(v) => setEp("spec-draft-type-v", v === "f16" ? "" : v)} />
-            </div>
-            {/* Per-spec-type ngram controls — shown only for the selected type */}
-            {getEp("spec-type") === "ngram-mod" && (
-              <div className="grid grid-cols-3 gap-3 mt-2">
-                <NumberInput label="ngram-mod N Min" hint="Default: 48" value={getEpNum("spec-ngram-mod-n-min")} min={0}
-                  onChange={(v) => setEpNum("spec-ngram-mod-n-min", v)} />
-                <NumberInput label="ngram-mod N Max" hint="Default: 64" value={getEpNum("spec-ngram-mod-n-max")} min={0}
-                  onChange={(v) => setEpNum("spec-ngram-mod-n-max", v)} />
-                <NumberInput label="ngram-mod Match" hint="Lookup length (default: 24)" value={getEpNum("spec-ngram-mod-n-match")} min={1}
-                  onChange={(v) => setEpNum("spec-ngram-mod-n-match", v)} />
-              </div>
-            )}
-            {getEp("spec-type") === "ngram-simple" && (
-              <div className="grid grid-cols-3 gap-3 mt-2">
-                <NumberInput label="ngram-simple Size N" hint="Lookup n-gram length" value={getEpNum("spec-ngram-simple-size-n")} min={1}
-                  onChange={(v) => setEpNum("spec-ngram-simple-size-n", v)} />
-                <NumberInput label="ngram-simple Size M" hint="Draft m-gram length" value={getEpNum("spec-ngram-simple-size-m")} min={1}
-                  onChange={(v) => setEpNum("spec-ngram-simple-size-m", v)} />
-                <NumberInput label="ngram-simple Min Hits" value={getEpNum("spec-ngram-simple-min-hits")} min={1}
-                  onChange={(v) => setEpNum("spec-ngram-simple-min-hits", v)} />
-              </div>
-            )}
-            {getEp("spec-type") === "ngram-map-k" && (
-              <div className="grid grid-cols-3 gap-3 mt-2">
-                <NumberInput label="ngram-map-k Size N" hint="Lookup n-gram length" value={getEpNum("spec-ngram-map-k-size-n")} min={1}
-                  onChange={(v) => setEpNum("spec-ngram-map-k-size-n", v)} />
-                <NumberInput label="ngram-map-k Size M" hint="Draft m-gram length" value={getEpNum("spec-ngram-map-k-size-m")} min={1}
-                  onChange={(v) => setEpNum("spec-ngram-map-k-size-m", v)} />
-                <NumberInput label="ngram-map-k Min Hits" value={getEpNum("spec-ngram-map-k-min-hits")} min={1}
-                  onChange={(v) => setEpNum("spec-ngram-map-k-min-hits", v)} />
-              </div>
-            )}
-            {getEp("spec-type") === "ngram-map-k4v" && (
-              <div className="grid grid-cols-3 gap-3 mt-2">
-                <NumberInput label="ngram-map-k4v Size N" hint="Lookup n-gram length" value={getEpNum("spec-ngram-map-k4v-size-n")} min={1}
-                  onChange={(v) => setEpNum("spec-ngram-map-k4v-size-n", v)} />
-                <NumberInput label="ngram-map-k4v Size M" hint="Draft m-gram length" value={getEpNum("spec-ngram-map-k4v-size-m")} min={1}
-                  onChange={(v) => setEpNum("spec-ngram-map-k4v-size-m", v)} />
-                <NumberInput label="ngram-map-k4v Min Hits" value={getEpNum("spec-ngram-map-k4v-min-hits")} min={1}
-                  onChange={(v) => setEpNum("spec-ngram-map-k4v-min-hits", v)} />
-              </div>
-            )}
-            <div className="grid grid-cols-2 gap-3 mt-2">
-              <TextInput label="Lookup Cache (Static)" hint="Read-only lookup cache file for lookup decoding" value={getEp("lookup-cache-static")}
-                onChange={(v) => setEp("lookup-cache-static", v)} />
-              <TextInput label="Lookup Cache (Dynamic)" hint="Lookup cache file updated by generation" value={getEp("lookup-cache-dynamic")}
-                onChange={(v) => setEp("lookup-cache-dynamic", v)} />
-            </div>
-
-            <Section title="LoRA & Control Vectors" />
-            <div className="grid grid-cols-1 gap-3">
-              <TextInput label="LoRA" hint="Comma-separated adapter paths" value={getEp("lora")}
-                onChange={(v) => setEp("lora", v)} />
-              <TextInput label="LoRA Scaled" hint="FNAME:SCALE,... format" value={getEp("lora-scaled")}
-                onChange={(v) => setEp("lora-scaled", v)} />
-              <TextInput label="Control Vector" hint="Comma-separated paths" value={getEp("control-vector")}
-                onChange={(v) => setEp("control-vector", v)} />
-              <TextInput label="Control Vector Scaled" hint="FNAME:SCALE,... format" value={getEp("control-vector-scaled")}
-                onChange={(v) => setEp("control-vector-scaled", v)} />
-            </div>
-            <Toggle label="LoRA Init Without Apply" hint="Load adapters without applying (use POST /lora-adapters later)"
-              checked={hasFlag("lora-init-without-apply")} onChange={(v) => setFlag("lora-init-without-apply", v)} />
-
-            <Section title="Multimodal" />
-            <div className="grid grid-cols-2 gap-3">
-              <TextInput label="mmproj URL" value={getEp("mmproj-url")}
-                onChange={(v) => setEp("mmproj-url", v)} />
-              <NumberInput label="Image Min Tokens" value={getEpNum("image-min-tokens")} min={0}
-                onChange={(v) => setEpNum("image-min-tokens", v)} />
-              <NumberInput label="Image Max Tokens" value={getEpNum("image-max-tokens")} min={0}
-                onChange={(v) => setEpNum("image-max-tokens", v)} />
-            </div>
-            <div className="space-y-3 mt-2">
-              <Toggle label="mmproj Offload" hint="GPU offload for multimodal projector (default: on)"
-                checked={!hasFlag("no-mmproj-offload")} onChange={(v) => setFlag("no-mmproj-offload", !v)} />
-              <Toggle label="mmproj Auto" hint="Auto-use multimodal projector if available (default: on)"
-                checked={!hasFlag("no-mmproj")} onChange={(v) => setFlag("no-mmproj", !v)} />
-            </div>
-
-            <Section title="TTS / Audio" />
-            <div className="grid grid-cols-2 gap-3">
-              <TextInput label="Vocoder Model" hint="Path to vocoder model for audio/TTS generation" value={getEp("model-vocoder")}
-                onChange={(v) => setEp("model-vocoder", v)} />
-            </div>
-            <div className="space-y-3 mt-2">
-              <Toggle label="TTS Guide Tokens" hint="Use guide tokens to improve TTS word recall" checked={hasFlag("tts-use-guide-tokens")} onChange={(v) => setFlag("tts-use-guide-tokens", v)} />
-            </div>
-
-            <Section title="CPU Affinity" />
-            <div className="grid grid-cols-2 gap-3">
-              <TextInput label="CPU Mask" hint="Hex affinity mask" value={getEp("cpu-mask")} onChange={(v) => setEp("cpu-mask", v)} />
-              <TextInput label="CPU Range" hint="lo-hi range" value={getEp("cpu-range")} onChange={(v) => setEp("cpu-range", v)} />
-              <SelectInput label="CPU Strict" value={getEp("cpu-strict") || "0"}
-                options={[{ value: "0", label: "Off (default)" }, { value: "1", label: "On" }]}
-                onChange={(v) => setEp("cpu-strict", v === "0" ? "" : v)} />
-              <SelectInput label="Priority" value={getEp("prio") || "0"}
-                options={[{ value: "-1", label: "Low" }, { value: "0", label: "Normal (default)" }, { value: "1", label: "Medium" }, { value: "2", label: "High" }, { value: "3", label: "Realtime" }]}
-                onChange={(v) => setEp("prio", v === "0" ? "" : v)} />
-              <NumberInput label="Poll" hint="Polling level 0-100 (default: 50)" value={getEpNum("poll")} min={0} max={100}
-                onChange={(v) => setEpNum("poll", v)} />
-            </div>
-
-            <Section title="Logging" />
-            <div className="grid grid-cols-2 gap-3">
-              <TextInput label="Log File" value={getEp("log-file")} onChange={(v) => setEp("log-file", v)} />
-              <SelectInput label="Log Colors" value={getEp("log-colors") || "auto"}
-                options={[{ value: "auto", label: "Auto" }, { value: "on", label: "On" }, { value: "off", label: "Off" }]}
-                onChange={(v) => setEp("log-colors", v === "auto" ? "" : v)} />
-              <SelectInput label="Verbosity" value={getEp("log-verbosity") || "3"}
-                options={[{ value: "0", label: "0 - Generic" }, { value: "1", label: "1 - Error" }, { value: "2", label: "2 - Warning" }, { value: "3", label: "3 - Info (default)" }, { value: "4", label: "4 - Debug" }]}
-                onChange={(v) => setEp("log-verbosity", v === "3" ? "" : v)} />
-            </div>
-            <div className="space-y-3 mt-2">
-              <Toggle label="Verbose" hint="Log all messages" checked={hasFlag("verbose")} onChange={(v) => setFlag("verbose", v)} />
-              <Toggle label="Perf Timings" hint="Internal libllama performance timings" checked={hasFlag("perf")} onChange={(v) => setFlag("perf", v)} />
-              <Toggle label="Log Prefix" hint="Add prefix to log messages" checked={hasFlag("log-prefix")} onChange={(v) => setFlag("log-prefix", v)} />
-              <Toggle label="Log Timestamps" hint="Add timestamps to log messages" checked={hasFlag("log-timestamps")} onChange={(v) => setFlag("log-timestamps", v)} />
-              <Toggle label="Offline" hint="Prevent network access, use cache only" checked={hasFlag("offline")} onChange={(v) => setFlag("offline", v)} />
-              <Toggle label="Profile" hint="Enable cross-backend profiling (CPU, BLAS, CUDA)" checked={hasFlag("profile")} onChange={(v) => setFlag("profile", v)} />
-            </div>
-            <div className="grid grid-cols-2 gap-3 mt-2">
-              <TextInput label="Profile Output" hint="Write profiling JSON to file (default: stdout)" value={getEp("profile-output")}
-                onChange={(v) => setEp("profile-output", v)} />
-            </div>
-
-            <Section title="Extra Arguments" />
-            <div>
-              <label className="label">Raw CLI Arguments</label>
-              <p className="text-xs text-gray-600 mb-1">
-                Any additional flags not covered above, space-separated
-              </p>
-              <input type="text" className="input font-mono text-xs"
-                value={getEp("__raw__")} placeholder="e.g. --reverse-prompt '### Human:'"
-                onChange={(e) => setEp("__raw__", e.target.value)} />
-            </div>
-          </>}
+          {/* Dynamic tab content — all params rendered from spec */}
+          {spec && TABS.map((tab) => (
+            activeTab === tab && (
+              <DynamicCategory key={tab} category={tab} spec={spec} config={config} setConfig={setConfig} />
+            )
+          ))}
+          {!spec && <p className="text-xs text-gray-500">Loading parameters...</p>}
         </div>
 
         {/* Server logs */}

@@ -10,6 +10,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use catapult_lib::config::AppConfig;
+use catapult_lib::llama_spec::LlamaSpec;
 use tui::app::{Action, TuiApp};
 use tui::event::{create_event_handler, TuiEvent};
 
@@ -31,6 +32,18 @@ async fn main() -> anyhow::Result<()> {
     // Load config
     let config = AppConfig::load().unwrap_or_default();
 
+    // Load llama spec (extracts default on first launch)
+    let llama_spec = LlamaSpec::load().unwrap_or_else(|e| {
+        eprintln!("Warning: failed to load llama-spec.json: {e}");
+        LlamaSpec {
+            version: 0,
+            source: String::new(),
+            migrations: catapult_lib::llama_spec::Migrations { drop: vec![], rename: std::collections::HashMap::new() },
+            defaults: std::collections::HashMap::new(),
+            params: vec![],
+        }
+    });
+
     // Setup terminal
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
@@ -42,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let (mut events, event_tx) = create_event_handler(Duration::from_secs(2));
 
     // Create app
-    let mut app = TuiApp::new(config, event_tx);
+    let mut app = TuiApp::new(config, event_tx, llama_spec);
 
     // Main loop
     loop {

@@ -44,7 +44,7 @@ pub struct ServerConfig {
     pub grp_attn_n: Option<u32>,
     pub grp_attn_w: Option<u32>,
     // Slots
-    pub parallel: u32,
+    pub parallel: i32,
     // Additional CLI parameters: key = flag name (without --), value = argument (empty for boolean flags)
     #[serde(default)]
     pub extra_params: HashMap<String, String>,
@@ -68,7 +68,7 @@ impl Default for ServerConfig {
             min_p: 0.05,
             top_p: 0.95,
             n_predict: -1,
-            n_batch: 512,
+            n_batch: 2048,
             n_ubatch: 512,
             cont_batching: true,
             mlock: false,
@@ -78,7 +78,7 @@ impl Default for ServerConfig {
             rope_freq_base: None,
             grp_attn_n: None,
             grp_attn_w: None,
-            parallel: 1,
+            parallel: -1,
             extra_params: HashMap::new(),
         }
     }
@@ -731,15 +731,15 @@ mod tests {
 
     #[test]
     fn build_args_default_has_parallel_and_cont_batching() {
-        // Default config: parallel=1, cont_batching=true
+        // Default config: parallel=-1 (auto), cont_batching=true
         let config = ServerConfig {
             model_path: "/m.gguf".to_string(),
             ..Default::default()
         };
         let args = build_args(&config);
-        // parallel=1 must be emitted (not omitted)
+        // parallel=-1 must be emitted for auto mode
         let idx = args.iter().position(|a| a == "--parallel").unwrap();
-        assert_eq!(args[idx + 1], "1");
+        assert_eq!(args[idx + 1], "-1");
         // cont_batching=true emits --cont-batching
         assert!(args.contains(&"--cont-batching".to_string()));
     }

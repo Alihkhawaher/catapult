@@ -17,6 +17,7 @@ catapult/
 │   ├── runtime.rs           # GitHub release fetching, asset scoring, download/extraction
 │   ├── models.rs            # GGUF scanning, metadata parsing, model download with resume
 │   ├── server.rs            # ServerConfig, process spawn/kill, CLI arg builder
+│   ├── llama_spec.rs        # Spec loader: embeds llama-spec.json, extracts to disk, migrations
 │   ├── huggingface.rs       # HF API search, recommended models, quant extraction, presets.ini fetch
 │   ├── main.rs              # GUI entry point stub
 │   ├── tui_main.rs          # TUI entry point (ratatui + crossterm)
@@ -51,6 +52,10 @@ catapult/
 │   ├── types/index.ts       # TypeScript interfaces mirroring Rust structs
 │   ├── utils/format.ts      # Shared formatting utilities
 │   └── styles/globals.css   # Tailwind component classes
+├── scripts/                   # Build/extraction scripts
+│   ├── extract_from_source.py # Parses arg.cpp C++ source → upstream_flags.json
+│   ├── build_spec.py          # Builds llama-spec.json from upstream + typed overrides
+│   └── tmp/                   # Cached arg.cpp from upstream
 └── tests
     ├── (Rust)               # Unit tests in #[cfg(test)] modules
     └── src/utils/format.test.ts  # Vitest unit tests
@@ -187,6 +192,20 @@ Models tagged as vision-capable are paired with compatible mmproj files found in
 - Active downloads are displayed in a persistent bar on the Models page regardless of active tab
 
 ## Server configuration
+
+### llama-spec.json (Parameter Spec)
+
+All llama.cpp server parameters are defined in a single JSON spec file (`src-tauri/llama-spec.json`) that drives both the TUI and GUI dynamically:
+
+- **343 parameters** across 6 categories: Context, Hardware, Sampling, Server, Chat, Advanced
+- **23 typed fields** mapped to `ServerConfig` struct (e.g. `ctx-size` → `n_ctx`, `temp` → `temperature`)
+- **320 extra params** stored in `extra_params: HashMap<String, String>`, passed through as `--flag value`
+- **Embedded in binary** via `include_str!()`, extracted to disk on first launch
+- **Users can edit** the disk copy to add/modify parameters without rebuilding
+
+The spec is loaded by `llama_spec.rs` and stored in `AppState`. The GUI fetches it via `get_llama_spec` IPC command and renders all parameter widgets dynamically. The TUI uses it for autocomplete and form generation.
+
+**Update workflow**: `python scripts/extract_from_source.py` parses `arg.cpp` directly → `python scripts/build_spec.py` builds the final spec with typed overrides.
 
 ### ServerConfig
 Core typed fields: model path, mmproj path, host, port, context size, GPU layers, threads, flash attention mode, KV cache types, sampling parameters (temperature, top-k/p, min-p, seed), batch sizes, memory flags (mlock, mmap), RoPE parameters, parallel slots.

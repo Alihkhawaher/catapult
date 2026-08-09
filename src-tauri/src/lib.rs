@@ -1,6 +1,7 @@
 pub mod config;
 pub mod hardware;
 pub mod huggingface;
+pub mod llama_spec;
 pub mod models;
 pub mod runtime;
 pub mod server;
@@ -24,6 +25,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Active download cancellation flags: id -> cancelled
     pub downloads: Mutex<HashMap<String, bool>>,
+    pub llama_spec: llama_spec::LlamaSpec,
 }
 
 // ── Hardware commands ─────────────────────────────────────────────────────────
@@ -490,6 +492,18 @@ async fn set_download_dir(path: String, state: State<'_, AppState>) -> Result<()
 // ── Server commands ────────────────────────────────────────────────────────────
 
 #[tauri::command]
+async fn get_llama_spec(state: State<'_, AppState>) -> Result<String, String> {
+    state.llama_spec.json_string().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_llama_spec_path() -> Result<String, String> {
+    AppConfig::llama_spec_path()
+        .map(|p| p.display().to_string())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn start_server(
     app: AppHandle,
     mut config: ServerConfig,
@@ -506,7 +520,7 @@ async fn start_server(
 
     // Strip flags removed/renamed in newer llama.cpp so old session state or
     // imported configs don't fail with "argument has been removed".
-    server::migrate_extra_params(&mut config.extra_params);
+    state.llama_spec.migrate_extra_params(&mut config.extra_params);
 
     server::start_server(
         &server_binary,
@@ -647,12 +661,12 @@ async fn save_server_preset(name: String, config: ServerConfig) -> Result<(), St
 }
 
 #[tauri::command]
-async fn load_server_preset(name: String) -> Result<ServerConfig, String> {
+async fn load_server_preset(name: String, state: State<'_, AppState>) -> Result<ServerConfig, String> {
     let dir = AppConfig::presets_dir().map_err(|e| e.to_string())?;
     let path = dir.join(format!("{}.json", name));
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let mut config: ServerConfig = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    server::migrate_extra_params(&mut config.extra_params);
+    state.llama_spec.migrate_extra_params(&mut config.extra_params);
     Ok(config)
 }
 
@@ -709,6 +723,23 @@ pub fn run() {
         .build()
         .expect("Failed to build HTTP client");
 
+    let llama_spec = match llama_spec::LlamaSpec::load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Warning: failed to load llama-spec.json: {e}");
+            eprintln!("Please ensure llama-spec.json exists in the catapult data directory.");
+            eprintln!("Run with --force-wizard or place the file manually.");
+            // Use a minimal empty spec as fallback
+            llama_spec::LlamaSpec {
+                version: 0,
+                source: String::new(),
+                migrations: llama_spec::Migrations { drop: vec![], rename: std::collections::HashMap::new() },
+                defaults: std::collections::HashMap::new(),
+                params: vec![],
+            }
+        }
+    };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -720,6 +751,7 @@ pub fn run() {
             server: server::new_server_state(),
             http_client,
             downloads: Mutex::new(HashMap::new()),
+            llama_spec,
         })
         .invoke_handler(tauri::generate_handler![
             // Hardware
@@ -763,6 +795,9 @@ pub fn run() {
             get_server_logs,
             suggest_server_config,
             open_chat_window,
+            // Llama Spec
+            get_llama_spec,
+            get_llama_spec_path,
             // Config
             get_config,
             set_models_dir,

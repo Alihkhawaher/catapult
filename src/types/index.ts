@@ -197,6 +197,38 @@ export interface DownloadProgress {
   status: string; // "downloading" | "extracting" | "done" | "error" | "paused" | "retrying (N/3)"
 }
 
+// ── Llama Spec ──────────────────────────────────────────────────────────────
+
+export interface LlamaParamDef {
+  key: string;
+  label: string;
+  description: string;
+  type: "integer" | "float" | "bool" | "string" | "enum";
+  enum_values: string[] | null;
+  default: string;
+  category: string;
+  typed: boolean;
+  cli_flag: string;
+  widget?: "slider";
+  min?: number;
+  max?: number;
+  step?: number;
+  decimals?: number;
+}
+
+export interface LlamaMigrations {
+  drop: string[];
+  rename: Record<string, string>;
+}
+
+export interface LlamaSpec {
+  version: number;
+  source: string;
+  migrations: LlamaMigrations;
+  defaults: Record<string, number>;
+  params: LlamaParamDef[];
+}
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 export interface AppConfig {

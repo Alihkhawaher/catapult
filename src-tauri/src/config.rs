@@ -254,6 +254,12 @@ impl AppConfig {
         Ok(data_dir.join("catapult").join("presets"))
     }
 
+    pub fn llama_spec_path() -> Result<PathBuf> {
+        let data_dir = dirs::data_dir()
+            .ok_or_else(|| anyhow::anyhow!("Cannot find data directory"))?;
+        Ok(data_dir.join("catapult").join("llama-spec.json"))
+    }
+
     // ── Runtime helpers ──────────────────────────────────────────────────────
 
     pub fn active_build(&self) -> Option<u32> {

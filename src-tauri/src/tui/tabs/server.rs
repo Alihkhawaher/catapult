@@ -7,12 +7,12 @@ use ratatui::{
     Frame,
 };
 
+use catapult_lib::llama_spec::LlamaSpec;
 use catapult_lib::config::AppConfig;
 use catapult_lib::server::ServerConfig;
 
 use crate::tui::app::{Action, Tab, TuiApp};
 use crate::tui::event::TuiEvent;
-use crate::tui::params::PARAMS;
 use crate::tui::server_ctl;
 use crate::tui::widgets::autocomplete::{self, AutocompleteItem, AutocompleteState};
 
@@ -62,13 +62,13 @@ pub struct OverrideEntry {
 }
 
 impl ServerTabState {
-    pub fn new() -> Self {
-        let items: Vec<AutocompleteItem> = PARAMS
+    pub fn new(spec: &LlamaSpec) -> Self {
+        let items: Vec<AutocompleteItem> = spec.params
             .iter()
             .map(|p| AutocompleteItem {
-                key: p.key.to_string(),
-                label: p.label.to_string(),
-                description: p.description.to_string(),
+                key: p.key.clone(),
+                label: p.label.clone(),
+                description: p.description.clone(),
             })
             .collect();
 
@@ -93,8 +93,8 @@ impl ServerTabState {
         }
     }
 
-    pub fn refresh_overrides(&mut self) {
-        self.overrides = collect_overrides(&self.config);
+    pub fn refresh_overrides(&mut self, spec: &LlamaSpec) {
+        self.overrides = collect_overrides(&self.config, spec);
     }
 
     pub fn load_presets(&mut self) {
@@ -104,7 +104,14 @@ impl ServerTabState {
 
 impl Default for ServerTabState {
     fn default() -> Self {
-        Self::new()
+        // Use an empty spec for default — will be replaced by TuiApp
+        Self::new(&LlamaSpec {
+            version: 0,
+            source: String::new(),
+            migrations: catapult_lib::llama_spec::Migrations { drop: vec![], rename: std::collections::HashMap::new() },
+            defaults: std::collections::HashMap::new(),
+            params: vec![],
+        })
     }
 }
 
@@ -175,7 +182,7 @@ pub fn load_preset_for_model(app: &mut crate::tui::app::TuiApp, model_path: &str
             cfg.model_path = current_model;
             cfg.mmproj_path = current_mmproj;
             app.server_tab.config = cfg;
-            app.server_tab.refresh_overrides();
+            app.server_tab.refresh_overrides(&app.llama_spec.clone());
             // Only track named (non-default) presets as "current"
             app.server_tab.current_preset = if name == "__default__" { None } else { Some(name.clone()) };
             return;
@@ -187,7 +194,7 @@ pub fn load_preset_for_model(app: &mut crate::tui::app::TuiApp, model_path: &str
 
 // ── Overrides collection ─────────────────────────────────────────────────────
 
-fn collect_overrides(config: &ServerConfig) -> Vec<OverrideEntry> {
+fn collect_overrides(config: &ServerConfig, spec: &LlamaSpec) -> Vec<OverrideEntry> {
     let defaults = ServerConfig::default();
     let mut overrides = Vec::new();
 
@@ -259,10 +266,10 @@ fn collect_overrides(config: &ServerConfig) -> Vec<OverrideEntry> {
                 });
             }
         } else {
-            let desc = PARAMS
+            let desc = spec.params
                 .iter()
                 .find(|p| p.key == k.as_str())
-                .map(|p| p.description)
+                .map(|p| p.description.as_str())
                 .unwrap_or("Custom parameter");
             overrides.push(OverrideEntry {
                 key: k.clone(),
@@ -364,7 +371,7 @@ fn handle_overrides_key(app: &mut TuiApp, key: KeyEvent) -> Action {
             {
                 let key = entry.key.clone();
                 remove_override(&mut app.server_tab.config, &key);
-                app.server_tab.refresh_overrides();
+                app.server_tab.refresh_overrides(&app.llama_spec.clone());
                 let count = app.server_tab.overrides.len();
                 if app.server_tab.override_selected > 0
                     && app.server_tab.override_selected >= count
@@ -428,7 +435,7 @@ fn handle_value_edit_key(app: &mut TuiApp, key: KeyEvent) -> Action {
             if let Some(ref param_key) = app.server_tab.editing_param.clone() {
                 let value = app.server_tab.editing_value.clone();
                 apply_override(&mut app.server_tab.config, param_key, &value);
-                app.server_tab.refresh_overrides();
+                app.server_tab.refresh_overrides(&app.llama_spec.clone());
                 app.server_tab.focus = ServerFocus::Search;
                 app.server_tab.editing_param = None;
                 app.server_tab.autocomplete.reset();
@@ -473,7 +480,7 @@ fn handle_preset_picker(app: &mut TuiApp, key: KeyEvent) -> Action {
                                 cfg.model_path = model_path.clone();
                                 cfg.mmproj_path = mmproj;
                                 app.server_tab.config = cfg;
-                                app.server_tab.refresh_overrides();
+                                app.server_tab.refresh_overrides(&app.llama_spec.clone());
                                 app.server_tab.current_preset = Some(name.clone());
                                 // Remember this preset for the current model
                                 if !model_path.is_empty() {
@@ -678,6 +685,9 @@ fn start_server_action(app: &mut TuiApp) {
         return;
     }
 
+    // Migrate extra_params using the spec
+    app.llama_spec.migrate_extra_params(&mut app.server_tab.config.extra_params);
+
     let config = app.config.clone();
     let runtime_info = match catapult_lib::runtime::get_runtime_info(&config) {
         Ok(ri) => ri,
@@ -733,7 +743,7 @@ fn stop_server_async(app: &mut TuiApp) {
 // ── Rendering ────────────────────────────────────────────────────────────────
 
 pub fn render(app: &mut TuiApp, area: Rect, frame: &mut Frame) {
-    app.server_tab.refresh_overrides();
+    app.server_tab.refresh_overrides(&app.llama_spec.clone());
 
     // Stopping modal
     if app.server_tab.stopping {

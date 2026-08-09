@@ -1,3 +1,6 @@
 .serena/
 dist/
 node_modules/
+src-tauri/
+tmp/
+upstream_flags.json

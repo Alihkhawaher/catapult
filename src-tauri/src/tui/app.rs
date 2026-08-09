@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use catapult_lib::config::AppConfig;
+use catapult_lib::llama_spec::LlamaSpec;
 use catapult_lib::runtime::DownloadProgress;
 
 use super::event::TuiEvent;
@@ -108,6 +109,7 @@ pub struct TuiApp {
     pub downloads: HashMap<String, ActiveDownload>,
     pub server: Option<DetectedServer>,
     pub input_focused: bool,
+    pub llama_spec: LlamaSpec,
 
     // Tab states
     pub dashboard: tabs::dashboard::DashboardState,
@@ -122,7 +124,7 @@ pub struct TuiApp {
 }
 
 impl TuiApp {
-    pub fn new(config: AppConfig, event_tx: mpsc::UnboundedSender<TuiEvent>) -> Self {
+    pub fn new(config: AppConfig, event_tx: mpsc::UnboundedSender<TuiEvent>, llama_spec: LlamaSpec) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -135,10 +137,11 @@ impl TuiApp {
             downloads: HashMap::new(),
             server: None,
             input_focused: false,
+            llama_spec: llama_spec.clone(),
             dashboard: tabs::dashboard::DashboardState::default(),
             runtime_tab: tabs::runtime::RuntimeTabState::default(),
             models_tab: tabs::models::ModelsTabState::default(),
-            server_tab: tabs::server::ServerTabState::new(),
+            server_tab: tabs::server::ServerTabState::new(&llama_spec),
             logs_tab: tabs::logs::LogsTabState::default(),
             chat_tab: tabs::chat::ChatTabState::default(),
             event_tx,
