@@ -365,10 +365,13 @@ fn scan_gguf_recursive(
                 continue;
             }
 
-            let name = cached_meta.name
-                .map(|n| n.rsplit('/').next().unwrap_or(&n).to_string())
-                .filter(|n| n.len() >= 4) // Ignore suspiciously short GGUF names
-                .unwrap_or(fallback_name);
+            // Prefer filename-derived name (more reliable) over GGUF metadata name.
+            // The GGUF general.name is often set by quantizers and can be misleading
+            // (e.g. "Abl 27b" for a Qwen3.8-27B model). The filename follows conventions
+            // like ModelName-Params-Quant.gguf which is more descriptive.
+            // GGUF metadata name is available in cached_meta.name but we prefer
+            // the filename-derived name for display (more reliable).
+            let name = fallback_name;
             let params_b = cached_meta.size_label
                 .or_else(|| extract_params_from_filename(&filename).map(|p| format!("{}B", p)));
 

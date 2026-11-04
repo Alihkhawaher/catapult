@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useNavigate } from "react-router-dom";
 import {
   Play,
@@ -14,6 +15,8 @@ import {
   FolderOpen,
   Trash2,
   Eye,
+  FolderSearch,
+  RefreshCw,
 } from "lucide-react";
 import type { ModelInfo, ServerConfig, ServerStatus, LlamaSpec } from "../types";
 
@@ -113,6 +116,110 @@ function TextInput({ label, hint, value, placeholder, onChange }: {
   );
 }
 
+function FileInput({ label, hint, value, onChange, filters }: {
+  label: string; hint?: string; value: string;
+  onChange: (v: string) => void;
+  filters?: { name: string; extensions: string[] }[];
+}) {
+  const browse = async () => {
+    const selected = await open({
+      multiple: false,
+      title: `Select ${label}`,
+      ...(filters ? { filters } : {}),
+    });
+    if (selected) onChange(selected);
+  };
+  return (
+    <div>
+      <label className="label">{label}</label>
+      {hint && <p className="text-xs text-gray-600 mb-1">{hint}</p>}
+      <div className="flex gap-1.5">
+        <input type="text" className="input flex-1" value={value}
+          placeholder="Enter path or browse..."
+          onChange={(e) => onChange(e.target.value)} />
+        <button type="button" className="btn-ghost px-2 shrink-0" onClick={browse}
+          title="Browse for file">
+          <FolderSearch size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ModelFileInput({ label, hint, value, onChange, models, excludePath }: {
+  label: string; hint?: string; value: string;
+  onChange: (v: string) => void;
+  models: ModelInfo[];
+  excludePath?: string;
+}) {
+  const [showList, setShowList] = useState(false);
+  const filteredModels = models.filter((m) => m.path !== excludePath);
+
+  const browse = async () => {
+    const selected = await open({
+      multiple: false,
+      title: `Select ${label}`,
+      filters: [{ name: "GGUF Models", extensions: ["gguf"] }],
+    });
+    if (selected) onChange(selected);
+  };
+
+  const selectedModel = models.find((m) => m.path === value);
+
+  return (
+    <div>
+      <label className="label">{label}</label>
+      {hint && <p className="text-xs text-gray-600 mb-1">{hint}</p>}
+      {/* Current value display / manual input */}
+      <div className="flex gap-1.5">
+        <input type="text" className="input flex-1" value={value}
+          placeholder="Select model or enter path..."
+          onChange={(e) => onChange(e.target.value)} />
+        <button type="button" className="btn-ghost px-2 shrink-0" onClick={browse}
+          title="Browse for GGUF file">
+          <FolderSearch size={14} />
+        </button>
+      </div>
+      {/* Installed models dropdown */}
+      {filteredModels.length > 0 && (
+        <div className="mt-1.5">
+          <button type="button"
+            className="text-xs text-primary-light hover:underline flex items-center gap-1"
+            onClick={() => setShowList(!showList)}>
+            {showList ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+            {showList ? "Hide" : "Select from"} installed models ({filteredModels.length})
+          </button>
+          {showList && (
+            <div className="mt-1.5 max-h-40 overflow-y-auto border border-border rounded">
+              {filteredModels.map((m) => {
+                const isSelected = value === m.path;
+                return (
+                  <button key={m.id} type="button"
+                    className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-xs transition-colors ${
+                      isSelected ? "bg-primary/10 text-primary-light" : "hover:bg-surface-3 text-gray-300"
+                    }`}
+                    onClick={() => { onChange(m.path); setShowList(false); }}>
+                    <HardDrive size={11} className="text-gray-500 shrink-0" />
+                    <span className="flex-1 truncate">{m.name}</span>
+                    {m.quant && <span className="badge-purple text-[10px]">{m.quant}</span>}
+                    <span className="text-gray-500">{(m.size_bytes / 1024 ** 3).toFixed(1)} GB</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+      {selectedModel && (
+        <p className="text-[10px] text-gray-500 mt-1 truncate">
+          {selectedModel.name}{selectedModel.quant ? ` (${selectedModel.quant})` : ""}
+          {" — "}{(selectedModel.size_bytes / 1024 ** 3).toFixed(1)} GB
+        </p>
+      )}
+    </div>
+  );
+}
+
 function SelectInput({ label, hint, value, options, onChange }: {
   label: string; hint?: string; value: string;
   options: { value: string; label: string }[];
@@ -135,10 +242,12 @@ function Section({ title }: { title: string }) {
 
 // ── Dynamic param renderer ─────────────────────────────────────────────────
 
-function DynamicParam({ param, config, setConfig }: {
+function DynamicParam({ param, config, setConfig, models, excludeModelPath }: {
   param: import("../types").LlamaParamDef;
   config: ServerConfig;
   setConfig: React.Dispatch<React.SetStateAction<ServerConfig>>;
+  models?: ModelInfo[];
+  excludeModelPath?: string;
 }) {
   const key = param.cli_flag;
 
@@ -222,15 +331,28 @@ function DynamicParam({ param, config, setConfig }: {
       onChange={setNumValue} />;
   }
 
+  // File browser widgets
+  if (param.widget === "model" && models) {
+    return <ModelFileInput label={param.label} hint={param.description} value={getValue()}
+      onChange={setStringValue} models={models} excludePath={excludeModelPath} />;
+  }
+
+  if (param.widget === "file") {
+    return <FileInput label={param.label} hint={param.description} value={getValue()}
+      onChange={setStringValue} />;
+  }
+
   // Default: string
   return <TextInput label={param.label} hint={param.description} value={getValue()} onChange={setStringValue} />;
 }
 
-function DynamicCategory({ category, spec, config, setConfig }: {
+function DynamicCategory({ category, spec, config, setConfig, models, excludeModelPath }: {
   category: string;
   spec: import("../types").LlamaSpec;
   config: ServerConfig;
   setConfig: React.Dispatch<React.SetStateAction<ServerConfig>>;
+  models?: ModelInfo[];
+  excludeModelPath?: string;
 }) {
   const params = spec.params.filter((p) => p.category === category);
   if (params.length === 0) return null;
@@ -243,14 +365,14 @@ function DynamicCategory({ category, spec, config, setConfig }: {
     <>
       {typedParams.length > 0 && (
         <div className="grid grid-cols-2 gap-3">
-          {typedParams.map((p) => <DynamicParam key={p.key} param={p} config={config} setConfig={setConfig} />)}
+          {typedParams.map((p) => <DynamicParam key={p.key} param={p} config={config} setConfig={setConfig} models={models} excludeModelPath={excludeModelPath} />)}
         </div>
       )}
       {extraParams.length > 0 && (
         <>
           {typedParams.length > 0 && <Section title="Additional Parameters" />}
           <div className="grid grid-cols-2 gap-3">
-            {extraParams.map((p) => <DynamicParam key={p.key} param={p} config={config} setConfig={setConfig} />)}
+            {extraParams.map((p) => <DynamicParam key={p.key} param={p} config={config} setConfig={setConfig} models={models} excludeModelPath={excludeModelPath} />)}
           </div>
         </>
       )}
@@ -495,6 +617,16 @@ export default function Server() {
     });
   };
 
+  const resetSpec = async () => {
+    if (!confirm("Reset parameter spec to built-in defaults? This will overwrite any custom edits to the spec file.")) return;
+    try {
+      const json = await invoke<string>("reset_llama_spec");
+      const newSpec = JSON.parse(json) as LlamaSpec;
+      setLlamaSpec(newSpec);
+      setShowPresetMenu(false);
+    } catch (e) { setError(String(e)); }
+  };
+
   // ── Data loading ──────────────────────────────────────────────────────────
 
   const openChat = async () => {
@@ -670,6 +802,11 @@ export default function Server() {
                       onClick={resetDefaults}>
                       Reset defaults to built-in
                     </button>
+                    <button className="w-full text-left px-3 py-2 text-xs text-gray-400 hover:bg-surface-3 hover:text-gray-200 flex items-center gap-1.5"
+                      onClick={resetSpec}>
+                      <RefreshCw size={10} />
+                      Regenerate parameter spec
+                    </button>
                   </div>
                   <div className="border-t border-border px-2 py-2 flex gap-1">
                     <input className="input text-xs py-1 flex-1" placeholder="Preset name…"
@@ -821,7 +958,8 @@ export default function Server() {
           {/* Dynamic tab content — all params rendered from spec */}
           {spec && TABS.map((tab) => (
             activeTab === tab && (
-              <DynamicCategory key={tab} category={tab} spec={spec} config={config} setConfig={setConfig} />
+              <DynamicCategory key={tab} category={tab} spec={spec} config={config} setConfig={setConfig}
+                models={models} excludeModelPath={config.model_path} />
             )
           ))}
           {!spec && <p className="text-xs text-gray-500">Loading parameters...</p>}

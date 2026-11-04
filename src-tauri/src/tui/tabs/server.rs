@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -11,7 +11,7 @@ use catapult_lib::llama_spec::LlamaSpec;
 use catapult_lib::config::AppConfig;
 use catapult_lib::server::ServerConfig;
 
-use crate::tui::app::{Action, Tab, TuiApp};
+use crate::tui::app::{Action, Tab, TuiApp, truncate_name};
 use crate::tui::event::TuiEvent;
 use crate::tui::server_ctl;
 use crate::tui::widgets::autocomplete::{self, AutocompleteItem, AutocompleteState};
@@ -25,6 +25,7 @@ pub enum ServerFocus {
     ValueEdit,
     PresetPicker,
     PresetNameInput,
+    ModelPicker,
 }
 
 pub struct ServerTabState {
@@ -44,6 +45,9 @@ pub struct ServerTabState {
     pub preset_action: PresetAction,
     /// Name of the currently loaded preset (None = default / no named preset)
     pub current_preset: Option<String>,
+    // Model picker (for widget: "model" params like spec-draft-model)
+    pub model_picker_selected: usize,
+    pub model_picker_param: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -90,6 +94,8 @@ impl ServerTabState {
             preset_name_input: String::new(),
             preset_action: PresetAction::Load,
             current_preset: None,
+            model_picker_selected: 0,
+            model_picker_param: None,
         }
     }
 
@@ -312,6 +318,7 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) -> Action {
         ServerFocus::ValueEdit => handle_value_edit_key(app, key),
         ServerFocus::PresetPicker => handle_preset_picker(app, key),
         ServerFocus::PresetNameInput => handle_preset_name(app, key),
+        ServerFocus::ModelPicker => handle_model_picker_key(app, key),
     }
 }
 
@@ -396,10 +403,22 @@ fn handle_search_key(app: &mut TuiApp, key: KeyEvent) -> Action {
         KeyCode::Enter => {
             if let Some(item) = app.server_tab.autocomplete.selected_item() {
                 let param_key = item.key.clone();
-                app.server_tab.editing_param = Some(param_key);
-                app.server_tab.editing_value.clear();
-                app.server_tab.focus = ServerFocus::ValueEdit;
-                app.server_tab.autocomplete.open = false;
+                // Check if this param has widget: "model" — show model picker instead
+                let is_model_widget = app.llama_spec.params.iter()
+                    .find(|p| p.key == param_key)
+                    .and_then(|p| p.widget.as_deref())
+                    == Some("model");
+                if is_model_widget {
+                    app.server_tab.model_picker_param = Some(param_key);
+                    app.server_tab.model_picker_selected = 0;
+                    app.server_tab.focus = ServerFocus::ModelPicker;
+                    app.server_tab.autocomplete.open = false;
+                } else {
+                    app.server_tab.editing_param = Some(param_key);
+                    app.server_tab.editing_value.clear();
+                    app.server_tab.focus = ServerFocus::ValueEdit;
+                    app.server_tab.autocomplete.open = false;
+                }
             }
         }
         KeyCode::Up => {
@@ -547,6 +566,48 @@ fn handle_preset_name(app: &mut TuiApp, key: KeyEvent) -> Action {
         }
         KeyCode::Char(c) => {
             app.server_tab.preset_name_input.push(c);
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_model_picker_key(app: &mut TuiApp, key: KeyEvent) -> Action {
+    let model_count = app.dashboard.models.len();
+    match key.code {
+        KeyCode::Esc => {
+            app.server_tab.focus = ServerFocus::Search;
+            app.server_tab.model_picker_param = None;
+        }
+        KeyCode::Up => {
+            if app.server_tab.model_picker_selected > 0 {
+                app.server_tab.model_picker_selected -= 1;
+            }
+        }
+        KeyCode::Down => {
+            if model_count > 0 && app.server_tab.model_picker_selected < model_count - 1 {
+                app.server_tab.model_picker_selected += 1;
+            }
+        }
+        KeyCode::Tab => {
+            // Switch to manual text entry for custom path
+            if let Some(ref param_key) = app.server_tab.model_picker_param.clone() {
+                app.server_tab.editing_param = Some(param_key.clone());
+                app.server_tab.editing_value.clear();
+                app.server_tab.focus = ServerFocus::ValueEdit;
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(model) = app.dashboard.models.get(app.server_tab.model_picker_selected) {
+                let path = model.path.display().to_string();
+                if let Some(ref param_key) = app.server_tab.model_picker_param.clone() {
+                    apply_override(&mut app.server_tab.config, param_key, &path);
+                    app.server_tab.refresh_overrides(&app.llama_spec.clone());
+                    app.server_tab.status_message = Some(format!("Set {} = {}", param_key, path));
+                }
+            }
+            app.server_tab.focus = ServerFocus::Search;
+            app.server_tab.model_picker_param = None;
         }
         _ => {}
     }
@@ -774,6 +835,12 @@ pub fn render(app: &mut TuiApp, area: Rect, frame: &mut Frame) {
     // Preset name input overlay
     if app.server_tab.focus == ServerFocus::PresetNameInput {
         render_preset_name_input(app, area, frame);
+        return;
+    }
+
+    // Model picker overlay
+    if app.server_tab.focus == ServerFocus::ModelPicker {
+        render_model_picker(app, area, frame);
         return;
     }
 
@@ -1058,4 +1125,86 @@ fn render_preset_name_input(app: &TuiApp, area: Rect, frame: &mut Frame) {
         )),
     ];
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_model_picker(app: &TuiApp, area: Rect, frame: &mut Frame) {
+    let param_label = app.server_tab.model_picker_param.as_deref().unwrap_or("model");
+    let models = &app.dashboard.models;
+
+    let block = Block::default()
+        .title(format!(" Select Model for {} ", param_label))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if models.is_empty() {
+        let empty = Paragraph::new(Line::from(Span::styled(
+            "  No models installed. Go to Models tab to add some.",
+            Style::default().fg(Color::DarkGray),
+        )));
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let visible = (inner.height as usize).saturating_sub(1); // -1 for footer
+    let scroll = if app.server_tab.model_picker_selected >= visible {
+        app.server_tab.model_picker_selected - visible + 1
+    } else {
+        0
+    };
+
+    let chunks = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let lines: Vec<Line> = models
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .map(|(i, m)| {
+            let is_selected = i == app.server_tab.model_picker_selected;
+            let marker = if is_selected { " > " } else { "   " };
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let name = m.name.as_str();
+            let quant = m.quant.as_deref().unwrap_or("");
+            let size_gb = m.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+
+            Line::from(vec![
+                Span::styled(marker, style),
+                Span::styled(format!("{:<40}", truncate_name(name, 40)), style),
+                Span::styled(
+                    format!(" {:<8}", quant),
+                    if is_selected { style } else { Style::default().fg(Color::Magenta) },
+                ),
+                Span::styled(
+                    format!(" {:.1} GB", size_gb),
+                    if is_selected { style } else { Style::default().fg(Color::DarkGray) },
+                ),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), chunks[0]);
+
+    // Footer with controls
+    let footer = Line::from(vec![
+        Span::styled("  [Enter]", Style::default().fg(Color::Green)),
+        Span::styled("Select  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("[↑↓]", Style::default().fg(Color::Cyan)),
+        Span::styled("Navigate  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("[Esc]", Style::default().fg(Color::Red)),
+        Span::styled("Cancel  ", Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(footer), chunks[1]);
 }

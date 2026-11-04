@@ -24,6 +24,16 @@ def fetch_arg_cpp():
     return data
 
 
+def extract_kv_cache_types(source):
+    """Extract KV cache type enum values from the kv_cache_types vector in arg.cpp."""
+    match = re.search(r'kv_cache_types\s*=\s*\{([^}]+)\}', source)
+    if not match:
+        return None
+    types = re.findall(r'GGML_TYPE_(\w+)', match.group(1))
+    # Convert to lowercase strings (matching ggml_type_name() behavior)
+    return [t.lower() for t in types] if types else None
+
+
 def extract_blocks(source):
     start = source.find("common_params_parser_init")
     if start == -1:
@@ -213,8 +223,8 @@ def extract_default(help_text):
     if m:
         val = m.group(1).strip().rstrip(")")
         val = val.split(",")[0].strip().strip("'\"")
-        # Reject C++ format specifiers: %d, %s, %.2f, %u, %02d, etc.
-        if re.search(r'%[\d.*]*(?:[sdfoxXeEgGu]|l[du])', val):
+        # Reject C++ format specifiers: %d, %s, %.2f, %u, %zu, %02d, etc.
+        if re.search(r'%[\d.*]*(?:z[ud]|l[du]|[sdfoxXeEgGu])', val):
             return ""
         # Normalize bool defaults
         if val in ("enabled", "true"):
@@ -223,6 +233,66 @@ def extract_default(help_text):
             return "off"
         return val
     return ""
+
+
+def clean_description(help_text, default_val, enum_vals):
+    """Centralized cleanup of C++ help text for display in the UI.
+
+    Resolves printf-style %s/%d format specifiers using extracted default
+    and enum values, strips C++ newlines, and removes noise.
+    """
+    if not help_text:
+        return ""
+
+    text = help_text
+
+    # Resolve "allowed values: %s" or "available values: %s" with actual enum values
+    if enum_vals and re.search(r'(?:allowed|available|valid)\s+values?:\s*%s', text, re.IGNORECASE):
+        vals_str = ", ".join(enum_vals)
+        text = re.sub(
+            r'((?:allowed|available|valid)\s+values?:\s*)%s',
+            r'\g<1>' + vals_str,
+            text,
+            flags=re.IGNORECASE
+        )
+
+    # Resolve "(default: %s)" or "(default: '%s')" with actual default value
+    if default_val:
+        text = re.sub(r"\(default:\s*'%s'\)", f"(default: '{default_val}')", text)
+        text = re.sub(r"\(default:\s*%s\)", f"(default: {default_val})", text)
+
+    # Strip remaining unresolved %s/%d/%zu format specifiers and their surrounding context
+    # Handle: (default: %s), (default: '%s'), default: '%s'), default: %s), default: %zu
+    # The opening paren may belong to a larger group, so don't require it
+    text = re.sub(r",?\s*default:\s*'%[\d.*]*(?:z[ud]|[sdfoxXeEgGu])'", '', text)
+    text = re.sub(r",?\s*default:\s*%[\d.*]*(?:z[ud]|[sdfoxXeEgGu])", '', text)
+
+    # Strip orphaned %s/%d/%zu that weren't resolved
+    text = re.sub(r'%[\d.*]*(?:z[ud]|[sdfoxXeEgGu])', '', text)
+
+    # Strip empty parentheses left after removing default clauses
+    text = re.sub(r'\(\s*\)', '', text)
+
+    # Strip trailing bool/enum value noise from help text
+    # C++ help sometimes ends with " enabled disabled" or " true false" etc.
+    text = re.sub(r'\s+(?:enabled|disabled)(\s+(?:enabled|disabled))?$', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+(?:true|false)(\s+(?:true|false))?$', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+(?:on|off)(\s+(?:on|off))?$', '', text, flags=re.IGNORECASE)
+
+    # Strip trailing "allowed values:" or "available values:" with nothing after
+    text = re.sub(r'\s*(?:allowed|available|valid)\s+values?:\s*$', '', text, flags=re.IGNORECASE)
+
+    # Normalize C++ escaped newlines to spaces
+    text = text.replace('\\n', ' ').replace('\\r', ' ')
+
+    # Collapse multiple spaces
+    text = re.sub(r'  +', ' ', text)
+
+    # Strip leading/trailing whitespace
+    text = text.strip()
+
+    # Truncate to 200 chars (matching previous behavior)
+    return text[:200]
 
 
 def determine_category(parsed, flag):
@@ -271,6 +341,10 @@ def make_label(flag):
 def main():
     source = fetch_arg_cpp()
     blocks = extract_blocks(source)
+    # Extract KV cache types from the global vector definition
+    kv_cache_types = extract_kv_cache_types(source)
+    if kv_cache_types:
+        print(f"Extracted KV cache types: {kv_cache_types}")
     print(f"Found {len(blocks)} add_opt() blocks")
     params, seen = [], set()
     for block in blocks:
@@ -280,23 +354,33 @@ def main():
         canonical = pick_canonical(parsed["flags"])
         if canonical in SKIP or canonical in seen or parsed["is_preset_only"]:
             continue
+        # Extract default and enum values first, so clean_description can use them
+        default_val = extract_default(parsed["help"])
+        ev = extract_enum_values(parsed)
+        # Auto-attach KV cache type enum values for cache-type params
+        if not ev and kv_cache_types:
+            # Match: --cache-type-k, --cache-type-v, --spec-draft-type-k, --spec-draft-type-v
+            if "cache-type" in canonical or re.search(r'-type-[kv]$', canonical):
+                ev = kv_cache_types
         entry = {
             "key": canonical, "label": make_label(canonical),
-            "description": parsed["help"][:200] if parsed["help"] else make_label(canonical),
-            "type": determine_type(parsed), "default": extract_default(parsed["help"]),
+            "description": clean_description(parsed["help"], default_val, ev),
+            "type": determine_type(parsed), "default": default_val,
             "category": determine_category(parsed, canonical),
             "typed": False, "cli_flag": canonical,
         }
-        ev = extract_enum_values(parsed)
         if ev:
             entry["enum_values"] = ev
+        if parsed.get("value_hint"):
+            entry["value_hint"] = parsed["value_hint"]
         params.append(entry)
         seen.add(canonical)
     cat_order = ["Context", "Hardware", "Sampling", "Server", "Chat", "Advanced"]
     params.sort(key=lambda p: (cat_order.index(p["category"]) if p["category"] in cat_order else 99, p["key"]))
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "upstream_flags.json")
     upstream = {p["key"]: {"default": p["default"], "desc": p["description"],
-        "type": p["type"], "category": p["category"], "enum_values": p.get("enum_values")}
+        "type": p["type"], "category": p["category"], "enum_values": p.get("enum_values"),
+        "value_hint": p.get("value_hint")}
         for p in params}
     with open(out, "w", encoding="utf-8") as f:
         json.dump(upstream, f, indent=2, ensure_ascii=False)

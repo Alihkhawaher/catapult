@@ -13,6 +13,30 @@ with open(flags_path, "r", encoding="utf-8") as f:
 # Skip meta/utility commands
 SKIP = {"help", "usage", "version", "cache-list", "completion-bash"}
 
+# Params whose value_hint is "FNAME" but which should NOT get a file-browse widget
+# (they are output files, URLs, or not useful to browse for)
+FNAME_SKIP_WIDGET = {
+    "file",               # --file: prompt input file (CLI-only, not server)
+    "output",             # --output: output file
+    "binary-file",        # --binary-file: CLI-only
+    "in-file",            # --in-file: CLI-only
+    "system-prompt-file", # --system-prompt-file: CLI-only
+    "context-file",       # --context-file: CLI-only
+    "positive-file",      # --positive-file: cvector generator
+    "negative-file",      # --negative-file: cvector generator
+    "save-all-logits",    # --save-all-logits: perplexity
+    "prompt-cache",       # --prompt-cache: CLI-only
+    "mmproj",             # --mmproj: already typed with special handling
+    "model",              # --model: already handled by main model picker
+    "tts-lang",           # --tts-lang: language code, not a file path
+}
+
+# Params that should get widget: "model" (dropdown of installed GGUF models)
+MODEL_WIDGET_PARAMS = {
+    "spec-draft-model",
+    "vocoder-model",
+}
+
 # ServerConfig struct field overrides: cli_flag -> extra fields
 # Only specify what differs from upstream. The rest comes from upstream_flags.json.
 TYPED = {
@@ -42,8 +66,9 @@ TYPED = {
     "parallel":      {"key": "parallel",       "default": "-1"},
     "numa":          {"key": "numa",           "default": ""},
     "mmproj":        {"key": "mmproj_path",    "default": ""},
-    # spec-type: enum values from runtime function, can't be extracted from source
-    "spec-type":     {"type": "enum",
+    # spec-type: needs enum_values override (can't be extracted from source)
+    # but must be typed:false (no ServerConfig field — flows through extra_params)
+    "spec-type":     {"type": "enum", "typed": False,
                       "enum_values": ["draft-simple", "draft-eagle3", "draft-mtp",
                                       "draft-dflash", "draft-dspark",
                                       "ngram-cache", "ngram-simple",
@@ -67,6 +92,13 @@ for flag, meta in sorted(upstream.items()):
     }
     if meta.get("enum_values"):
         entry["enum_values"] = meta["enum_values"]
+    # Add widget hints for file-path params (FNAME in arg.cpp)
+    vh = meta.get("value_hint")
+    if vh == "FNAME":
+        if flag in MODEL_WIDGET_PARAMS:
+            entry["widget"] = "model"
+        elif flag not in FNAME_SKIP_WIDGET:
+            entry["widget"] = "file"
     params.append(entry)
     seen.add(flag)
 
@@ -82,7 +114,7 @@ for cli_flag, overrides in TYPED.items():
         "type": overrides.get("type", up.get("type", "string")),
         "default": overrides.get("default", up.get("default", "")),
         "category": overrides.get("category", up.get("category", "Server")),
-        "typed": True,
+        "typed": overrides.get("typed", True),
         "cli_flag": cli_flag,
     }
     if overrides.get("enum_values"):
@@ -100,7 +132,7 @@ params.sort(key=lambda p: (cat_order.index(p["category"]) if p["category"] in ca
 
 # MIGRATIONS for old config keys
 spec = {
-    "version": 1,
+    "version": 2,
     "source": "https://github.com/ggml-org/llama.cpp/blob/master/common/arg.cpp",
     "migrations": {
         "drop": ["spec-ngram-size-n", "spec-ngram-size-m", "spec-ngram-min-hits"],

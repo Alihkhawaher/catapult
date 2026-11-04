@@ -459,7 +459,7 @@ impl TuiApp {
     }
 }
 
-fn truncate_name(s: &str, max: usize) -> String {
+pub(crate) fn truncate_name(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {

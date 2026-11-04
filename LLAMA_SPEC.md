@@ -75,6 +75,20 @@ Binary starts
 
 When `min`/`max` are present on a numeric type, the GUI renders a **slider**.
 
+### Widget Hints
+
+The optional `widget` field on a param controls special rendering:
+
+| Widget | TUI | GUI | Use for |
+|--------|-----|-----|---------|
+| `"slider"` | (n/a) | Slider with min/max/step | Numeric params with range (temperature, top-k, etc.) |
+| `"file"` | Text input | Text input + **Browse** file button | File paths (LoRA, grammar, SSL certs, API keys, etc.) |
+| `"model"` | Model picker popup | Dropdown of installed GGUF models + **Browse** button | GGUF model paths (spec-draft-model, etc.) |
+
+The `"model"` widget filters out the main model (the one selected at the top of the Server page) from the dropdown, since you wouldn't use the same model as both main and draft. Users can still type a custom path for models not in scanned directories.
+
+File-path params are automatically detected from the upstream `arg.cpp` source (value hint `"FNAME"`) and assigned the appropriate widget when the spec is rebuilt with `build_spec.py`.
+
 ### Categories
 
 Params are grouped into 6 tabs: `Context`, `Hardware`, `Sampling`, `Server`, `Chat`, `Advanced`
@@ -103,6 +117,8 @@ Params are grouped into 6 tabs: `Context`, `Hardware`, `Sampling`, `Server`, `Ch
   - `enum` → SelectInput dropdown with `enum_values`
   - `integer`/`float` with `min`/`max` → Slider
   - `integer`/`float` without → NumberInput
+  - `string` with `widget: "file"` → TextInput + Browse file button
+  - `string` with `widget: "model"` → Model dropdown + Browse GGUF button
   - `string` → TextInput
 - **Typed params** (`typed: true`) read/write from `ServerConfig` fields directly
 - **Non-typed params** (`typed: false`) read/write from `extra_params[cli_flag]`

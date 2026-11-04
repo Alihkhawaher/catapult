@@ -209,7 +209,7 @@ export interface LlamaParamDef {
   category: string;
   typed: boolean;
   cli_flag: string;
-  widget?: "slider";
+  widget?: "slider" | "file" | "model";
   min?: number;
   max?: number;
   step?: number;

@@ -504,6 +504,12 @@ async fn get_llama_spec_path() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn reset_llama_spec(_state: State<'_, AppState>) -> Result<String, String> {
+    let new_spec = llama_spec::LlamaSpec::reset().map_err(|e| e.to_string())?;
+    new_spec.json_string().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn start_server(
     app: AppHandle,
     mut config: ServerConfig,
@@ -798,6 +804,7 @@ pub fn run() {
             // Llama Spec
             get_llama_spec,
             get_llama_spec_path,
+            reset_llama_spec,
             // Config
             get_config,
             set_models_dir,
